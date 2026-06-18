@@ -1,0 +1,20 @@
+{
+  "name": "@leptin/client",
+  "version": "0.1.0",
+  "description": "TypeScript client for the Leptin agent-memory server — recall under a token budget, with receipts.",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["mcp", "memory", "agent", "llm", "tokens", "leptin", "claude"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/lionellau/leptin" },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

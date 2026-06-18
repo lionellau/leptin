@@ -1,0 +1,43 @@
+[project]
+name = "leptin-mcp"
+version = "0.1.0"
+description = "The satiety hormone for agent memory — a drop-in MCP memory server that puts your agent's long-term memory on a token budget, shows the receipts, and guarantees it never silently forgot anything."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Leptin contributors" }]
+keywords = ["mcp", "claude", "agent", "memory", "llm", "tokens", "context", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+# Core has ZERO required third-party dependencies — it runs fully offline on the
+# Python standard library. Hosted embeddings / LLM merge and exact tokenization
+# are optional upgrades.
+dependencies = []
+
+[project.optional-dependencies]
+hosted = ["openai>=1.0", "anthropic>=0.40", "tiktoken>=0.7"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+leptin = "leptin.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/lionellau/leptin"
+Repository = "https://github.com/lionellau/leptin"
+Issues = "https://github.com/lionellau/leptin/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/leptin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "leptin": {
+      "command": "leptin",
+      "args": ["serve", "--db", "~/.leptin/memory.db"]
+    }
+  }
+}
