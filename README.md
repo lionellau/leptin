@@ -6,7 +6,7 @@
 
 **A drop-in MCP memory server that puts your agent's long-term memory on a token budget, shows you the receipts, and guarantees it never silently forgot anything that mattered.**
 
-[![tests](https://img.shields.io/badge/tests-56%20passing-3fb950)](#testing)
+[![tests](https://img.shields.io/badge/tests-74%20passing-3fb950)](#testing)
 [![benchmark](https://img.shields.io/badge/LoCoMo--mini-66%25%20fewer%20tokens%20%40%200%25%20recall%20loss-3fb950)](#the-headline-reproduce-it-yourself)
 [![python](https://img.shields.io/badge/python-3.10%2B-58a6ff)](#install)
 [![deps](https://img.shields.io/badge/core%20deps-zero-58a6ff)](#design)
@@ -75,7 +75,16 @@ Being honest is the point of a tool that sells "the receipts":
 ### 1. Install
 
 ```bash
-pip install leptin-mcp        # or: uvx leptin-mcp ...   /   uv pip install leptin-mcp
+pip install leptin-mcp                 # once published to PyPI
+uvx leptin-mcp serve                   # zero-install run (uv)
+
+# until then — straight from the repo:
+pip install "git+https://github.com/lionellau/leptin"
+# or from a clone:
+git clone https://github.com/lionellau/leptin && cd leptin && pip install -e .
+
+# optional: hosted embeddings + LLM merge (OpenAI / Voyage / Claude)
+pip install "leptin-mcp[hosted]"
 ```
 
 ### 2. Connect it to Claude Code / Codex
@@ -208,6 +217,9 @@ mem.close()
 
 ## CLI
 
+All commands are also available as `python -m leptin <command>` if the console
+script isn't on your PATH.
+
 ```bash
 leptin serve   --db PATH        # run the MCP server on stdio
 leptin bench   [--budget N]     # reproducible token-savings benchmark
@@ -228,7 +240,7 @@ leptin inspect [--query "..."]
 uv venv && uv pip install -e ".[dev]" && pytest
 ```
 
-56 tests cover the PRD acceptance criteria: budget guarantees, the savings-ledger math, dedup/merge/supersede, decay, the guardrail rollback/commit invariants, glass-box reversibility, the MCP protocol surface, and the reproducible benchmark.
+74 tests cover the PRD acceptance criteria: budget guarantees, the savings-ledger math, dedup/merge/supersede, decay, the guardrail rollback/commit invariants, glass-box reversibility, the MCP protocol surface (including a real `leptin serve` subprocess driven over stdio), the hosted OpenAI/Voyage/Anthropic integration paths (mock-verified), env config coercion, and the reproducible benchmark. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
 
 ---
 

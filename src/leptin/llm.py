@@ -133,6 +133,32 @@ def _is_subsumed(sentence: str, existing: list[str], threshold: float = 0.8) -> 
     return False
 
 
+def _split_decision(text: str) -> tuple[str, str]:
+    """Split an LLM merge/supersede reply into (verb, body), robustly.
+
+    Models are inconsistent about the separator after the verb: a real newline,
+    a literal ``\\n`` echoed verbatim, a colon, or just a space. Splitting only
+    on a real newline silently dropped the fused body when the model echoed the
+    literal form, so we normalise the leading verb out and return the remainder.
+    """
+    text = text.strip()
+    upper = text.upper()
+    for verb in ("SUPERSEDE", "MERGE"):
+        if upper.startswith(verb):
+            rest = text[len(verb):]
+            # Strip a single leading separator: literal "\n", real newline,
+            # colon, or surrounding whitespace.
+            rest = rest.lstrip()
+            if rest.startswith("\\n"):
+                rest = rest[2:]
+            elif rest[:1] in ("\n", ":"):
+                rest = rest[1:]
+            return verb, rest.strip()
+    # No recognised verb prefix: fall back to first-line / remainder split.
+    head, _, body = text.partition("\n")
+    return head.strip(), body.strip()
+
+
 class HostedMerger:  # pragma: no cover - needs network
     """LLM-powered fusion + contradiction judgement (Claude / GPT)."""
 
@@ -146,12 +172,14 @@ class HostedMerger:  # pragma: no cover - needs network
             "Two memory entries about the same subject may be duplicates, "
             "complementary, or contradictory.\n"
             f"OLDER: {older}\nNEWER: {newer}\n\n"
-            "If they contradict, reply exactly: SUPERSEDE\\n<the newer fact>.\n"
-            "Otherwise reply: MERGE\\n<one concise canonical memory fusing both>."
+            "If they contradict, start your reply with SUPERSEDE then the newer "
+            "fact on the next line.\n"
+            "Otherwise start your reply with MERGE then one concise canonical "
+            "memory fusing both on the next line."
         )
         text = self._complete(prompt).strip()
-        head, _, body = text.partition("\n")
-        if head.strip().upper().startswith("SUPERSEDE"):
+        head, body = _split_decision(text)
+        if head.upper().startswith("SUPERSEDE"):
             return MergeResult("supersede", (body or newer).strip(), "LLM: contradiction")
         return MergeResult("merge", (body or newer).strip(), "LLM: fused")
 

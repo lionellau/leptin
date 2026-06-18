@@ -25,6 +25,8 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 leptin = "leptin.cli:main"
+# Alias so `uvx leptin-mcp ...` works (uvx runs the same-named script).
+leptin-mcp = "leptin.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/lionellau/leptin"
