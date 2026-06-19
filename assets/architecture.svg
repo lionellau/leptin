@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 540" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3fb950" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#3fb950" stop-opacity="0"/>
+    </linearGradient>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#8b98a9"/>
+    </marker>
+    <marker id="arrg" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="540" fill="#0b0e14"/>
+  <text x="40" y="46" fill="#e6edf3" font-size="22" font-weight="700">🧬 How Leptin works</text>
+  <text x="40" y="70" fill="#8b98a9" font-size="14">A diet + scale + safety net between your agent and its long-term memory.</text>
+
+  <!-- Agent -->
+  <rect x="40" y="120" width="160" height="300" rx="12" fill="#121722" stroke="#1e2636"/>
+  <text x="120" y="160" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="650">Claude Code</text>
+  <text x="120" y="180" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="650">/ Codex</text>
+  <text x="120" y="210" text-anchor="middle" fill="#8b98a9" font-size="12">(any MCP client)</text>
+  <text x="120" y="300" text-anchor="middle" fill="#58a6ff" font-size="12">remember ↓</text>
+  <text x="120" y="320" text-anchor="middle" fill="#58a6ff" font-size="12">recall ↑</text>
+  <text x="120" y="345" text-anchor="middle" fill="#8b98a9" font-size="11">MCP · stdio</text>
+
+  <!-- MCP arrows -->
+  <line x1="200" y1="270" x2="300" y2="270" stroke="#3fb950" stroke-width="2" marker-end="url(#arrg)"/>
+  <line x1="300" y1="300" x2="200" y2="300" stroke="#3fb950" stroke-width="2" marker-end="url(#arrg)"/>
+
+  <!-- Leptin panel -->
+  <rect x="300" y="100" width="430" height="360" rx="14" fill="#0f1420" stroke="#26324a"/>
+  <text x="320" y="128" fill="#3fb950" font-size="15" font-weight="700">Leptin (MCP server · SQLite · zero deps)</text>
+
+  <!-- remember -->
+  <rect x="320" y="146" width="390" height="64" rx="10" fill="#121722" stroke="#1e2636"/>
+  <text x="334" y="170" fill="#e6edf3" font-size="13" font-weight="650">1 · remember</text>
+  <text x="334" y="190" fill="#8b98a9" font-size="12">dedup / merge near-duplicates · supersede contradictions</text>
+  <text x="334" y="204" fill="#8b98a9" font-size="12">(the store stops accumulating restatements)</text>
+
+  <!-- recall -->
+  <rect x="320" y="220" width="390" height="64" rx="10" fill="#121722" stroke="#1e2636"/>
+  <text x="334" y="244" fill="#e6edf3" font-size="13" font-weight="650">2 · recall</text>
+  <text x="334" y="264" fill="#8b98a9" font-size="12">rank by similarity × strength → pack under a hard</text>
+  <text x="334" y="278" fill="#8b98a9" font-size="12">token budget (not a top-k dump)</text>
+
+  <!-- compact + guardrail -->
+  <rect x="320" y="294" width="390" height="64" rx="10" fill="#121722" stroke="#1e2636"/>
+  <text x="334" y="318" fill="#e6edf3" font-size="13" font-weight="650">3 · compact</text>
+  <text x="334" y="338" fill="#8b98a9" font-size="12">time-decay prune + merge, behind a <tspan fill="#f0883e">recall guardrail</tspan></text>
+  <text x="334" y="352" fill="#8b98a9" font-size="12">that auto-rolls-back any prune that hurts recall</text>
+
+  <!-- self-tuning loop -->
+  <rect x="320" y="368" width="390" height="74" rx="10" fill="#121722" stroke="#26324a"/>
+  <text x="334" y="392" fill="#c08bf0" font-size="13" font-weight="650">🧬 self-tune (closed loop)</text>
+  <text x="334" y="412" fill="#8b98a9" font-size="12">replay your data under candidate policies → commit only</text>
+  <text x="334" y="426" fill="#8b98a9" font-size="12">on a held-out net win, else revert · offline · 0 LLM calls</text>
+
+  <!-- arrow to storage -->
+  <line x1="730" y1="240" x2="800" y2="240" stroke="#8b98a9" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- storage -->
+  <rect x="800" y="120" width="160" height="240" rx="12" fill="#121722" stroke="#1e2636"/>
+  <text x="880" y="150" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="650">SQLite</text>
+  <text x="880" y="168" text-anchor="middle" fill="#8b98a9" font-size="11">(zero infra)</text>
+  <text x="880" y="200" text-anchor="middle" fill="#8b98a9" font-size="12">memories</text>
+  <text x="880" y="224" text-anchor="middle" fill="#3fb950" font-size="12">savings ledger</text>
+  <text x="880" y="248" text-anchor="middle" fill="#f0883e" font-size="12">guardrail probes</text>
+  <text x="880" y="272" text-anchor="middle" fill="#c08bf0" font-size="12">evolution ledger</text>
+  <text x="880" y="320" text-anchor="middle" fill="#8b98a9" font-size="11">every op logged,</text>
+  <text x="880" y="336" text-anchor="middle" fill="#8b98a9" font-size="11">reversible</text>
+
+  <!-- savings callout -->
+  <rect x="40" y="460" width="920" height="56" rx="12" fill="url(#g)" stroke="#1e2636"/>
+  <text x="500" y="485" text-anchor="middle" fill="#3fb950" font-size="16" font-weight="700">≥60% fewer memory tokens · ≤2% recall loss · receipts in tokens &amp; $ · nothing silently forgotten</text>
+  <text x="500" y="505" text-anchor="middle" fill="#8b98a9" font-size="12">reproduce offline with one command:  leptin bench</text>
+</svg>

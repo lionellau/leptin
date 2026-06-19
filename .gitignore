@@ -11,7 +11,13 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
-# Leptin data
+# Leptin data / any SQLite memory store (never commit a user's memories)
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
 *.leptin.db
 *.leptin.db-*
 leptin.db
