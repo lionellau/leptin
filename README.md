@@ -7,7 +7,7 @@
 **Leptin is a local-first *control loop* that keeps your coding agent's long-term memory correct over time. It rides your agent's existing harness — the session-start, post-tool, and pre-compact hooks already firing every loop — to resolve contradictions, retire stale facts, make hard-won lessons stick, and learn which memories actually help. So the agent stops acting on outdated information and stops repeating mistakes — and before it ever forgets anything, it *proves* you can still recall what matters.**
 
 [![CI](https://github.com/lionellau/leptin/actions/workflows/ci.yml/badge.svg)](https://github.com/lionellau/leptin/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/leptin-mcp?color=3fb950)](https://pypi.org/project/leptin-mcp/)
+[![PyPI](https://img.shields.io/pypi/v/leptin-hlp?color=3fb950)](https://pypi.org/project/leptin-hlp/)
 [![python](https://img.shields.io/badge/python-3.10%2B-58a6ff)](#install)
 [![core deps](https://img.shields.io/badge/core%20deps-zero-58a6ff)](#design)
 [![tests](https://img.shields.io/badge/tests-131%20passing-3fb950)](#testing)
@@ -79,10 +79,10 @@ The defining mechanisms:
 
 ### 1. Install
 ```bash
-pip install leptin-mcp                 # once published to PyPI
+pip install leptin-hlp                 # once published to PyPI
 pip install "git+https://github.com/lionellau/leptin"   # from source today
 # optional hosted embeddings + LLM merge:
-pip install "leptin-mcp[hosted]"
+pip install "leptin-hlp[hosted]"
 ```
 
 ### 2. Wire it into Claude Code / Codex (hooks + lean MCP)
@@ -133,7 +133,7 @@ If you need a managed, hosted memory platform, use one. Leptin is the small, loc
 ## Design
 
 - **Zero core dependencies** — engine, MCP server, hooks, guardrail, dashboard, benchmark, self-tuner all run on the Python stdlib. `pip install` is instant.
-- **Offline by default, hosted by upgrade** — deterministic hashing embeddings + heuristic merge need no API key; `leptin-mcp[hosted]` adds OpenAI/Voyage embeddings + Claude/GPT merging (with retry + caching).
+- **Offline by default, hosted by upgrade** — deterministic hashing embeddings + heuristic merge need no API key; `leptin-hlp[hosted]` adds OpenAI/Voyage embeddings + Claude/GPT merging (with retry + caching).
 - **Glass box, reversible** — every merge/decay/forget/supersede/tune is logged with a reason; nothing is hard-deleted within the retention window; schema is versioned and migrates in place.
 
 > Offline-mode caveat: the default hashing embedder catches *near-lexical* duplicates, not deep paraphrases. Configure hosted embeddings for semantic dedup. Defaults err toward **keeping** data.

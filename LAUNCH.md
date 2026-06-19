@@ -18,7 +18,7 @@ launched and got discovered. Work top-to-bottom.
 - [x] Architecture diagram (`assets/architecture.svg`)
 - [ ] **Terminal demo GIF** — `vhs assets/demo.tape` → `assets/demo.gif`, then add it
       to the top of the README. (Highest-ROI single asset; needs `vhs` installed.)
-- [ ] **Publish to PyPI** so `pip install leptin-mcp` works for real:
+- [ ] **Publish to PyPI** so `pip install leptin-hlp` works for real:
       `python -m build && python -m twine upload dist/*`
 - [ ] Repo **description** + **20 topics** set (see below)
 - [ ] **Social preview** uploaded (Settings → Options → Social preview)

@@ -281,7 +281,7 @@ def cmd_doctor(args) -> int:
         key_env = "VOYAGE_API_KEY" if pkg == "voyageai" else "OPENAI_API_KEY"
         have_key = bool(os.environ.get(key_env))
         lvl = "ok" if (have_pkg and have_key) else "warn"
-        add(lvl, "Embeddings", f"{emb} | SDK '{pkg}' {'installed' if have_pkg else 'MISSING (pip install leptin-mcp[hosted])'}"
+        add(lvl, "Embeddings", f"{emb} | SDK '{pkg}' {'installed' if have_pkg else 'MISSING (pip install leptin-hlp[hosted])'}"
             f" | {key_env} {'set' if have_key else 'not set → will fall back to local'}")
 
     llm = cfg.llm_model
@@ -363,7 +363,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dataset", help="Path to a real LoCoMo-format JSON (else bundled synthetic).")
     sp.add_argument("--limit", type=int, default=0, help="Max LoCoMo samples to load.")
     sp.add_argument("--embedding-model", default="local-hash",
-                    help="e.g. text-embedding-3-small (needs leptin-mcp[hosted] + API key).")
+                    help="e.g. text-embedding-3-small (needs leptin-hlp[hosted] + API key).")
     sp.add_argument("--llm-model", default="heuristic", help="e.g. gpt-4o-mini for merges.")
     sp.add_argument("--json", action="store_true", help="Also print the raw result JSON.")
     sp.set_defaults(func=cmd_bench)

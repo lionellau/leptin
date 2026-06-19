@@ -2,7 +2,7 @@
 
 Dependency-free: speaks the Model Context Protocol over newline-delimited
 JSON-RPC on stdin/stdout so Claude Code / Codex can connect with a standard
-config block and zero install friction (``uvx leptin-mcp serve``). Diagnostics
+config block and zero install friction (``uvx leptin-hlp serve``). Diagnostics
 go to stderr; only protocol messages go to stdout.
 """
 
