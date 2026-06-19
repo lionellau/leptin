@@ -61,20 +61,30 @@ class Guardrail:
 
     # ------------------------------------------------------------- probe set
     def derive_probes(self, now: float) -> list[dict[str, Any]]:
-        """Auto-probes guard *important* (above-floor) memories.
-
-        Decay-eligible memories (below ``strength_floor``) are intentionally NOT
-        auto-probed — they are exactly what compaction is allowed to prune. A
-        user who cares about a specific weak memory adds an explicit probe, which
-        is always honoured (see :meth:`build_probe_set`).
+        """Auto-probes guard *important* memories: above-floor AND not proven
+        disposable. "Important" means useful, not merely injected a lot — so a
+        memory that's recalled-but-never-useful ("noise"), stale, or marked
+        harmful is NOT auto-probed (it's exactly what compaction may prune). A
+        user who cares about a specific one adds an explicit probe, always honoured.
         """
+        from leptin.engine import _NOISE_INJECTS  # lazy: avoids an import cycle
+
         cfg = self.engine.config
         actives = self.engine.store.list_memories(status="active")
-        keep = [
-            (self.engine.effective_strength(m, now), m)
-            for m in actives
-            if self.engine.effective_strength(m, now) >= cfg.strength_floor
-        ]
+
+        def important(m: dict[str, Any]) -> bool:
+            if self.engine.effective_strength(m, now) < cfg.strength_floor:
+                return False
+            if m.get("stale") or int(m.get("harmful_count", 0) or 0) > 0:
+                return False
+            # injected a lot but never proved useful → don't protect it
+            if (m.get("mtype") != "lesson"
+                    and int(m.get("inject_count", 0) or 0) >= _NOISE_INJECTS
+                    and int(m.get("useful_count", 0) or 0) == 0):
+                return False
+            return True
+
+        keep = [(self.engine.effective_strength(m, now), m) for m in actives if important(m)]
         keep.sort(key=lambda x: x[0], reverse=True)
         return [
             {"question": (m.get("subject") or "") + " " + m["content"],

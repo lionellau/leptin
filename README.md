@@ -2,15 +2,15 @@
 
 # 🧬 Leptin
 
-### Memory that stays correct.
+### A control loop for agent memory.
 
-**The local-first memory layer that keeps your coding agent's long-term facts *current* — so it stops acting on stale information and stops repeating mistakes — and *proves*, before it forgets anything, that you can still recall what matters.**
+**Leptin is a local-first *control loop* that keeps your coding agent's long-term memory correct over time. It rides your agent's existing harness — the session-start, post-tool, and pre-compact hooks already firing every loop — to resolve contradictions, retire stale facts, make hard-won lessons stick, and learn which memories actually help. So the agent stops acting on outdated information and stops repeating mistakes — and before it ever forgets anything, it *proves* you can still recall what matters.**
 
 [![CI](https://github.com/lionellau/leptin/actions/workflows/ci.yml/badge.svg)](https://github.com/lionellau/leptin/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/leptin-mcp?color=3fb950)](https://pypi.org/project/leptin-mcp/)
 [![python](https://img.shields.io/badge/python-3.10%2B-58a6ff)](#install)
 [![core deps](https://img.shields.io/badge/core%20deps-zero-58a6ff)](#design)
-[![tests](https://img.shields.io/badge/tests-122%20passing-3fb950)](#testing)
+[![tests](https://img.shields.io/badge/tests-131%20passing-3fb950)](#testing)
 [![license](https://img.shields.io/badge/license-MIT-8b98a9)](LICENSE)
 
 [Quickstart](#quickstart) · [Why I built this](#why-i-built-this) · [How it works](#how-it-works) · [Who it's for](#who-leptin-is-for) · [Where it fits](#where-leptin-fits-vs--alongside-other-tools) · [Security](#security)
@@ -23,7 +23,7 @@
 
 A persistent memory layer is supposed to make your agent smarter over time. Left ungoverned it does the opposite: it accumulates **duplicates, stale facts, and outright contradictions**, so the agent ends up *confidently wrong* — "use pnpm" survives six weeks after you switched to bun — and it repeats mistakes you already taught it not to make. The tools that prune to fix this do it **blindly**: you can't see what was dropped, can't get it back, and have no guarantee a useful fact wasn't deleted.
 
-**Leptin is the memory *governor*, not another store.** It keeps the store current (dedup, supersede contradictions, decay what's cold), keeps your **lessons-learned permanent** and re-injects them automatically, and never prunes without first **proving recall didn't regress** — rolling back if it did.
+**Leptin is the *loop* that keeps memory correct — not another store.** A store answers "what did I save?"; Leptin closes the loop around it: every session, it dedups, supersedes contradictions so the *current* truth wins, decays what's cold, keeps your **lessons-learned permanent** and re-injects them automatically, watches which memories actually get used, and never prunes without first **proving recall didn't regress** — rolling back if it did. It plugs into the harness your agent already runs (hooks), and sits *alongside* whatever store or context-compressor you already use.
 
 > Two outcomes you can feel:
 > 1. your agent stops acting on **stale / contradictory** memory, and
@@ -45,7 +45,13 @@ The ecosystem is good and moving fast — plenty of tools store, compress, and d
 
 ## How it works
 
-Leptin runs in **three layers** — and the model-facing one is deliberately tiny.
+Leptin is a loop, not a tool the model calls. Each turn of your agent's harness fires it: **session-start** injects lessons + current truth, **post-tool** captures mistakes the moment they happen, **pre-compact / stop** runs the guarded prune. The loop spans **three layers** — and the model-facing one is deliberately tiny.
+
+<div align="center">
+<img src="assets/loop.svg" alt="The Leptin control loop: inject → act → capture → reconcile → verify → forget" width="760"/>
+</div>
+
+> Why the loop, not just an MCP tool? An MCP server is *pull* — it works only when the model remembers to call it. Memory hygiene can't depend on that. Leptin runs on the harness's *push* points (hooks) so the discipline happens every loop whether or not the model asks. The MCP surface is just the two tools (`recall`/`remember`) the model genuinely needs in-band. See [docs/loops.md](docs/loops.md).
 
 <div align="center">
 <img src="assets/architecture.svg" alt="Leptin architecture" width="900"/>
@@ -62,6 +68,9 @@ The defining mechanisms:
 - **Contradiction resolution (supersede).** A newer fact that conflicts with an older one wins; the old one is kept, marked superseded, and stays auditable. Recall returns the *current* truth, not both.
 - **Verified, transactional forgetting (the guardrail).** Before any prune commits, Leptin re-runs a probe set against the post-prune store *inside a transaction*; if recall would regress, the whole prune **rolls back**. Nothing is silently lost, and everything is reversible.
 - **Provenance anchoring.** Anchor a memory to its source (`linear:ABC-123`, `spec:auth.md#flow`, `commit:sha`). When the source changes, `leptin stale <ref>` flags it — stale memories are down-weighted, not blindly trusted ("a fact is confidently wrong the moment its source changes").
+- **Auto mistake-capture (the post-tool loop).** When a tool call fails (a bad command, a broken build), the post-tool hook distills it into a never-decaying lesson automatically — no one has to remember to write it down. Next session it's re-injected, so the agent doesn't walk into the same wall twice.
+- **Recall-usefulness flywheel.** Leptin tracks which memories get injected, which recur across sessions (a useful signal), and which you flag as harmful (`leptin feedback <id> --harmful`). Memories that prove useful are reinforced; memories injected again and again but never useful are treated as **noise** and become prune candidates — so the store gets *more* relevant the more you use it, not just bigger.
+- **Memory-health score.** `leptin health` grades the store 0–100 (A–D) on stale rate, noise rate, and harmful hits, and flags drift before recall quality rots — an at-a-glance read on whether the loop is keeping memory clean.
 - **Budgeted, packed recall + savings ledger.** Recall is capped and packed for relevance; every op logs tokens (and $) saved vs. a naive top-k dump.
 
 ---
@@ -82,13 +91,15 @@ leptin connect claude-code     # prints the config: lifecycle hooks + the 2-tool
 ```
 This installs the **discipline as hooks** (memory auto-injected at session start; compaction on stop) and exposes only `recall` + `remember` to the model.
 
-### 3. Teach it a lesson, then watch it stick
+### 3. Teach it a lesson, then watch the loop keep it correct
 ```bash
 leptin lesson "Never run DB migrations on a Friday deploy."
 # next session, that lesson is injected automatically — the agent won't repeat it
 leptin remember "Auth uses JWT in cookies." --subject auth --source-ref spec:auth.md#tokens
 leptin stale spec:auth.md#tokens     # when the spec changes, the memory is flagged
-leptin doctor                        # health check    ·    leptin dashboard   # the receipts
+leptin feedback <id> --harmful       # close the loop: tell Leptin a recall misled the agent
+leptin health                        # 0–100 score: is the loop keeping memory clean?
+leptin dashboard                     # the receipts (tokens & $ saved, the audit trail)
 ```
 
 <div align="center"><img src="assets/dashboard.png" alt="Leptin dashboard" width="760"/></div>
@@ -110,12 +121,12 @@ The value shows up when an agent's memory **accumulates over time** and gets que
 
 ## Where Leptin fits (vs / alongside other tools)
 
-This isn't a teardown — the memory space is strong. Leptin sits on a **different axis**: it's the correctness/discipline layer, not a store or a compressor.
+This isn't a teardown — the memory space is strong and these are good tools. Leptin sits on a **different axis**: most tools answer *"what do I store and how small can I make it?"* Leptin answers *"is what I'm storing still correct, and is it actually helping?"* — it's a control loop, not a store or a compressor, and it runs **alongside** them.
 
-- **vs storage layers (Mem0, vector stores):** they store and retrieve by similarity; they don't adjudicate which conflicting fact is *currently true* or verify a prune. Leptin does — and can run **alongside** them.
-- **vs compression layers (e.g. Headroom):** they shrink what the agent reads (great at that) and keep everything, but don't decide truth or keep lessons permanent. Leptin is complementary — it governs the long-term store's *correctness*; they shrink the stream.
+- **vs storage layers (Mem0, vector stores):** they store and retrieve by similarity — excellent at that. They don't adjudicate which conflicting fact is *currently true*, verify that a prune didn't cost you a fact, or learn which memories actually earned their place. Leptin closes that loop, and can sit **on top of** your store.
+- **vs context-compression layers (e.g. Headroom):** they shrink what the agent reads each turn (great at that) and keep everything. Leptin works on the other end — the long-term store's *correctness over time*: superseding stale truth, keeping lessons permanent, pruning proven-noise under a recall guardrail. Compress the stream **and** govern the store; they don't overlap.
 
-If you need a managed, hosted memory platform, use one. Leptin is the small, local, auditable governor for keeping long-term memory **correct**.
+If you need a managed, hosted memory platform, use one. Leptin is the small, local, auditable loop that keeps long-term memory **correct and useful** — and plugs into whatever else you run.
 
 ---
 
@@ -155,7 +166,7 @@ On the bundled synthetic corpus, budgeted/packed recall returns **~66% fewer tok
 ```bash
 uv venv && uv pip install -e ".[dev]" && pytest
 ```
-122 tests cover memory typing + never-decaying lessons, contradiction-supersede, the guardrail rollback/commit invariants, provenance/staleness, the hook entrypoint (SessionStart injection), the lean vs `all` MCP surface (incl. a real `leptin serve` subprocess), schema migrations, the savings ledger, self-tuning, the dashboard HTTP layer, hosted integration + retry/degradation, and the reproducible benchmark. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
+131 tests cover memory typing + never-decaying lessons, contradiction-supersede, the guardrail rollback/commit invariants, provenance/staleness, the recall-usefulness flywheel (inject/useful/harmful counters, noise pruning under the guardrail), auto mistake-capture via the post-tool hook, the memory-health score, the hook entrypoint (SessionStart injection), the lean vs `all` MCP surface (incl. a real `leptin serve` subprocess), schema migrations, the savings ledger, self-tuning, the dashboard HTTP layer, hosted integration + retry/degradation, and the reproducible benchmark. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
 
 ---
 
@@ -168,6 +179,8 @@ leptin hook    <event>             # lifecycle-hook entrypoint (used by connect)
 leptin lesson  "..."               # store a never-decaying lesson
 leptin remember "..." [--type fact|procedural|task|lesson] [--source-ref REF]
 leptin stale   <source-ref>        # flag memories whose source changed
+leptin feedback <id>... [--harmful]  # close the loop: reinforce or down-weight a memory
+leptin health                      # 0–100 memory-health score (stale / noise / harmful, A–D)
 leptin recall  "..." [--budget N]
 leptin compact [--dry-run]    leptin tune [--dry-run|--rollback|--history]
 leptin doctor   ·   leptin dashboard   ·   leptin report   ·   leptin bench
@@ -177,9 +190,9 @@ leptin doctor   ·   leptin dashboard   ·   leptin report   ·   leptin bench
 
 ## Roadmap
 
-**Shipped:** memory typing + never-decaying lessons · contradiction-supersede · verified transactional forgetting (guardrail + rollback) · provenance anchoring + staleness · lifecycle hooks (Claude Code + Codex) with SessionStart injection · lean MCP surface · budgeted recall + savings ledger · self-tuning · local dashboard · `leptin doctor` · schema migrations · 122 tests + CI.
+**Shipped:** memory typing + never-decaying lessons · contradiction-supersede · verified transactional forgetting (guardrail + rollback) · provenance anchoring + staleness · the full control loop on lifecycle hooks (Claude Code + Codex): SessionStart injection, **post-tool auto mistake-capture**, pre-compact guarded prune · **recall-usefulness flywheel** (inject/useful/harmful + noise pruning) · **memory-health score** · lean MCP surface · budgeted recall + savings ledger · self-tuning · local dashboard · `leptin doctor` · schema migrations · 131 tests + CI.
 
-**Next:** more source adapters (Linear / GitHub / Jira / spec watchers) · a governor/adapter mode over an existing store (Mem0 / pgvector) · more host installers (Cursor, Gemini CLI) · `sqlite-vec` fast path.
+**Next:** a governor/adapter mode that runs the loop over an existing store (Mem0 / pgvector) so you keep your backend · more source adapters (Linear / GitHub / Jira / spec watchers) · more host installers (Cursor, Gemini CLI) · `sqlite-vec` fast path.
 
 ---
 

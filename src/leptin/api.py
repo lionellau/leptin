@@ -95,6 +95,15 @@ class Leptin:
     def flag_stale(self, source_ref: str) -> dict[str, Any]:
         return self.engine.flag_stale(source_ref)
 
+    def record_feedback(self, memory_ids: list[str], signal: str) -> dict[str, Any]:
+        return self.engine.record_feedback(memory_ids, signal)
+
+    def capture_lesson(self, content: str, subject: str = "anti-pattern") -> dict[str, Any]:
+        return self.engine.capture_lesson(content, subject=subject)
+
+    def health(self) -> dict[str, Any]:
+        return self.engine.health()
+
     def compact(self, dry_run: bool = False) -> dict[str, Any]:
         return self.engine.compact(dry_run=dry_run)
 

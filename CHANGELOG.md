@@ -4,6 +4,38 @@ All notable changes to Leptin are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-06-20
+
+The **feedback-loop** release. Sharpens the positioning from "memory governor" to a
+**control loop for agent memory** — the discipline lives on the harness's hooks
+(push), not behind tools the model has to call (pull) — and adds the loops that make
+the store get *more correct and more useful with use*, the axis a plain store or a
+context-compressor doesn't cover. See [docs/loops.md](docs/loops.md).
+
+### Added
+- **Auto mistake-capture (post-tool loop).** The `PostToolUse` hook distills a failed
+  tool call into a never-decaying lesson automatically — re-injected next session, so
+  the agent doesn't repeat it. (`leptin hook post-tool-use`.)
+- **Recall-usefulness flywheel.** Memories now track `inject_count`, `useful_count`,
+  and `harmful_count`. Memories that recur across sessions or are marked useful get
+  reinforced; memories injected repeatedly but never useful are treated as **noise**
+  and become prune candidates — under the same recall guardrail. `leptin feedback
+  <id>... [--harmful]` closes the loop by hand.
+- **Memory-health score.** `leptin health` grades the store 0–100 (A–D) on stale rate,
+  noise rate, and harmful hits, with drift flags; also surfaced in `diet_report`.
+- **`docs/loops.md`** — design note on why Leptin is a loop on the harness, not an
+  MCP tool the model must remember to call.
+
+### Changed
+- Repositioned README/docs/package metadata around the **control loop** (harness +
+  hooks) rather than the MCP surface; added the loop diagram (`assets/loop.svg`).
+- `derive_probes` now treats importance as *useful*, not merely *injected*, so the
+  guardrail no longer protects noise from its own (safe) pruning.
+
+### Storage
+- Schema v4: adds `inject_count`, `useful_count`, `harmful_count`, and
+  `last_inject_session` to `memories` (migrates in place; additive, reversible).
+
 ## [1.1.0] — 2026-06-20
 
 Repositioned from a token-saving store into a **memory governor**: keep long-term

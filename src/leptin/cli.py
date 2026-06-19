@@ -106,6 +106,23 @@ def cmd_stale(args) -> int:
     return 0
 
 
+def cmd_feedback(args) -> int:
+    from leptin.api import Leptin
+
+    signal = "harmful" if args.harmful else "useful"
+    with Leptin(args.db) as mem:
+        _print_json(mem.record_feedback(args.memory_id, signal))
+    return 0
+
+
+def cmd_health(args) -> int:
+    from leptin.api import Leptin
+
+    with Leptin(args.db) as mem:
+        _print_json(mem.health())
+    return 0
+
+
 def cmd_recall(args) -> int:
     from leptin.api import Leptin
 
@@ -162,11 +179,35 @@ def cmd_hook(args) -> int:
                     hook_event = "UserPromptSubmit" if "prompt" in event else "SessionStart"
                     print(json.dumps({"hookSpecificOutput": {
                         "hookEventName": hook_event, "additionalContext": text}}))
+            elif event in ("post-tool-use", "posttooluse"):
+                # Mistake→lesson loop: a failed tool call becomes a never-decaying,
+                # auto-re-injected anti-pattern lesson (dedup prevents spam).
+                lesson = _lesson_from_failure(payload)
+                if lesson:
+                    mem.capture_lesson(lesson)
             elif event in ("stop", "session-end", "sessionend", "pre-compact", "precompact"):
                 mem.compact()  # decay + guardrailed prune; keeps the store clean
     except Exception:  # noqa: BLE001 — a hook must never break the host session
         pass
     return 0
+
+
+def _lesson_from_failure(payload: dict) -> Optional[str]:
+    """Heuristically turn a failed PostToolUse payload into an anti-pattern line."""
+    resp = payload.get("tool_response") or payload.get("tool_result") or {}
+    is_error = bool(payload.get("is_error") or (isinstance(resp, dict) and resp.get("is_error")))
+    text = resp.get("error") if isinstance(resp, dict) else None
+    text = text or (resp if isinstance(resp, str) else "") or str(payload.get("error") or "")
+    if not is_error and "error" not in text.lower() and "fail" not in text.lower():
+        return None
+    tool = payload.get("tool_name") or payload.get("tool") or "a tool"
+    cmd = ""
+    ti = payload.get("tool_input") or {}
+    if isinstance(ti, dict):
+        cmd = ti.get("command") or ti.get("file_path") or ""
+    summary = (text or "").strip().splitlines()[0][:160] if text else "it failed"
+    detail = f" ({cmd})" if cmd else ""
+    return f"Avoid: {tool}{detail} failed — {summary}"
 
 
 def cmd_connect(args) -> int:
@@ -177,6 +218,7 @@ def cmd_connect(args) -> int:
         evt: [{"hooks": [{"type": "command", "command": f"{leptin} hook {hk} --db {db}"}]}]
         for evt, hk in (("SessionStart", "session-start"),
                         ("UserPromptSubmit", "user-prompt-submit"),
+                        ("PostToolUse", "post-tool-use"),
                         ("Stop", "stop"), ("PreCompact", "pre-compact"))
     }
     block = {"mcpServers": {"leptin": {"command": leptin, "args": ["serve", "--db", db]}},
@@ -355,6 +397,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_db(sp)
     sp.add_argument("source_ref", help="e.g. linear:ABC-123 or spec:auth.md#flow")
     sp.set_defaults(func=cmd_stale)
+
+    sp = sub.add_parser("feedback", help="Tell Leptin a recalled memory was useful/harmful.")
+    add_db(sp)
+    sp.add_argument("memory_id", nargs="+", help="One or more memory ids.")
+    sp.add_argument("--harmful", action="store_true", help="Mark harmful (default: useful).")
+    sp.set_defaults(func=cmd_feedback)
+
+    sp = sub.add_parser("health", help="Memory-health score + drift flags.")
+    add_db(sp)
+    sp.set_defaults(func=cmd_health)
 
     sp = sub.add_parser("hook", help="Lifecycle-hook entrypoint for Claude Code / Codex.")
     add_db(sp)

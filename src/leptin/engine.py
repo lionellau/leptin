@@ -42,6 +42,8 @@ _TYPE_HALFLIFE_MULT: dict[str, Optional[float]] = {
     "lesson": None,     # lessons-learned / anti-patterns — never decay
 }
 _STALE_PENALTY = 0.25   # down-weight (don't hide) memories whose source changed
+_HARMFUL_PENALTY = 0.4  # strength multiplier per 'harmful' feedback mark
+_NOISE_INJECTS = 5      # injected this many times with 0 usefulness → it's padding
 
 
 class DietEngine:
@@ -176,13 +178,17 @@ class DietEngine:
 
     def effective_strength(self, mem: dict[str, Any], now: Optional[float] = None) -> float:
         now = self.store.now() if now is None else now
+        # Outcome feedback: memories marked harmful are down-weighted (a wrong
+        # memory that misled the agent should fade from recall).
+        penalty = _HARMFUL_PENALTY ** int(mem.get("harmful_count", 0) or 0)
         mult = _TYPE_HALFLIFE_MULT.get(mem.get("mtype", "fact"), 1.0)
         if mult is None:
             # Lessons-learned / anti-patterns never decay — they must stay
             # available so the agent stops repeating known mistakes.
-            return float(mem["strength"])
+            return float(mem["strength"]) * penalty
         half = self.config.decay_half_life_days * mult
-        return float(mem["strength"]) * self._decay_factor(mem["last_accessed_at"], now, half)
+        decay = self._decay_factor(mem["last_accessed_at"], now, half)
+        return float(mem["strength"]) * decay * penalty
 
     def _keyword_sim(self, a: str, b: str) -> float:
         wa = set(_WORD.findall(a.lower()))
@@ -224,6 +230,44 @@ class DietEngine:
             last_accessed_at=now,
             access_count=mem["access_count"] + 1,
         )
+
+    def _track_injection(self, mem: dict[str, Any]) -> None:
+        """Usefulness loop: count injections; if a memory is needed again in a
+        *different, later* session, that recurrence is real evidence it's useful."""
+        fields: dict[str, Any] = {"inject_count": int(mem.get("inject_count", 0)) + 1,
+                                  "last_inject_session": self.session_id}
+        last = mem.get("last_inject_session")
+        if last and last != self.session_id:
+            fields["useful_count"] = int(mem.get("useful_count", 0)) + 1
+        self.store.update_memory(mem["id"], **fields)
+
+    def record_feedback(self, memory_ids: list[str], signal: str) -> dict[str, Any]:
+        """Close the loop with an explicit outcome signal on recalled memories.
+
+        ``useful`` reinforces; ``harmful`` down-weights (and flags for review) —
+        a wrong memory that misled the agent shouldn't keep being recalled."""
+        now = self.store.now()
+        touched = []
+        for mid in memory_ids:
+            m = self.store.get_memory(mid)
+            if not m:
+                continue
+            if signal == "useful":
+                self.store.update_memory(mid, useful_count=int(m.get("useful_count", 0)) + 1)
+                self._reinforce(m, now)
+                self.store.add_event(mid, "recall_inject", reason="feedback: useful")
+            elif signal == "harmful":
+                self.store.update_memory(mid, harmful_count=int(m.get("harmful_count", 0)) + 1,
+                                         stale=1)
+                self.store.add_event(mid, "decay", reason="feedback: harmful")
+            touched.append(mid)
+        return {"signal": signal, "updated": touched, "count": len(touched)}
+
+    def capture_lesson(self, content: str, subject: str = "anti-pattern") -> dict[str, Any]:
+        """Auto-capture an anti-pattern as a never-decaying, re-injected lesson —
+        the mistake→lesson→prevent loop, closed automatically from a failure."""
+        return self.remember(content, subject=subject, source="auto-captured",
+                             mtype="lesson")
 
     def _log_recall(
         self, baseline: int, actual: int, detail: Optional[dict[str, Any]] = None
@@ -408,6 +452,7 @@ class DietEngine:
 
         for m in injected:
             self._reinforce(m, now)
+            self._track_injection(m)
             self.store.add_event(m["id"], "recall_inject", reason=f"query: {query[:60]}")
 
         saved = self._log_recall(
@@ -507,13 +552,18 @@ class DietEngine:
           wins, the older is marked superseded.
         """
         actives = self.store.list_memories(status="active")
-        decay_ids = {
-            m["id"] for m in actives
-            # Lessons never decay-prune (their effective_strength never drops),
-            # but guard explicitly so they're never decay-eligible.
-            if m.get("mtype") != "lesson"
-            and self.effective_strength(m, now) < self.config.strength_floor
-        }
+
+        def prune_eligible(m: dict[str, Any]) -> bool:
+            if m.get("mtype") == "lesson":   # lessons never prune
+                return False
+            # Decayed below the floor, OR "noise": injected many times yet never
+            # proved useful (the recall-usefulness loop's prune signal).
+            if self.effective_strength(m, now) < self.config.strength_floor:
+                return True
+            return (int(m.get("inject_count", 0)) >= _NOISE_INJECTS
+                    and int(m.get("useful_count", 0)) == 0)
+
+        decay_ids = {m["id"] for m in actives if prune_eligible(m)}
         decayed = [m for m in actives if m["id"] in decay_ids]
 
         # Pairwise consolidation among the survivors (skip decay-eligible ones).
@@ -753,6 +803,7 @@ class DietEngine:
             "top_savers": top_savers,
             "note": note,
             "tuning": self._tuning_report(),
+            "health": self.health(),
         }
 
     def _tuning_report(self) -> Optional[dict[str, Any]]:
@@ -830,4 +881,38 @@ class DietEngine:
             "mtype": mem.get("mtype", "fact"),
             "source_ref": mem.get("source_ref"),
             "stale": bool(mem.get("stale")),
+            "inject_count": int(mem.get("inject_count", 0) or 0),
+            "useful_count": int(mem.get("useful_count", 0) or 0),
+            "harmful_count": int(mem.get("harmful_count", 0) or 0),
         }
+
+    # ------------------------------------------------------------- memory health
+    def health(self) -> dict[str, Any]:
+        """A 0–100 memory-health score + drift flags — the observable output of
+        the loops. Storage/compression layers don't expose this."""
+        actives = self.store.list_memories(status="active")
+        n = len(actives)
+        if n == 0:
+            return {"score": 100, "active": 0, "stale_rate": 0.0, "noise_rate": 0.0,
+                    "harmful": 0, "lessons": 0, "drift": [], "grade": "A"}
+        stale = sum(1 for m in actives if m.get("stale"))
+        harmful = sum(1 for m in actives if int(m.get("harmful_count", 0) or 0) > 0)
+        noise = sum(1 for m in actives
+                    if m.get("mtype") != "lesson"
+                    and int(m.get("inject_count", 0) or 0) >= _NOISE_INJECTS
+                    and int(m.get("useful_count", 0) or 0) == 0)
+        lessons = sum(1 for m in actives if m.get("mtype") == "lesson")
+        stale_rate = stale / n
+        noise_rate = noise / n
+        score = round(100 * (1 - 0.6 * stale_rate - 0.3 * noise_rate
+                             - 0.4 * (harmful / n)))
+        score = max(0, min(100, score))
+        drift = []
+        if stale_rate > 0.25:
+            drift.append(f"{stale}/{n} memories are stale — run `leptin compact` or re-anchor sources")
+        if noise_rate > 0.25:
+            drift.append(f"{noise}/{n} memories are recalled-but-never-useful — `leptin compact` will prune them")
+        grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D"
+        return {"score": score, "grade": grade, "active": n, "stale_rate": round(stale_rate, 3),
+                "noise_rate": round(noise_rate, 3), "harmful": harmful, "lessons": lessons,
+                "drift": drift}

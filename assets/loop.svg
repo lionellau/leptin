@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="loopArr" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="480" fill="#0b0e14"/>
+  <text x="40" y="34" fill="#e6edf3" font-size="21" font-weight="700">🧬 The Leptin loop</text>
+  <text x="40" y="56" fill="#8b98a9" font-size="13">Not a tool the model calls — a control loop that rides the harness hooks already firing each turn.</text>
+
+  <g transform="translate(0,40)">
+    <!-- loop ring -->
+    <circle cx="380" cy="235" r="150" fill="none" stroke="#1e2636" stroke-width="2"/>
+
+    <!-- clockwise direction arrows on the ring -->
+    <path d="M426.4,92.3 A150,150 0 0,1 480.4,123.5" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#loopArr)"/>
+    <path d="M526.7,203.8 A150,150 0 0,1 526.7,266.2" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#loopArr)"/>
+    <path d="M480.4,346.5 A150,150 0 0,1 426.4,377.7" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#loopArr)"/>
+    <path d="M333.6,377.7 A150,150 0 0,1 279.6,346.5" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#loopArr)"/>
+    <path d="M233.3,266.2 A150,150 0 0,1 233.3,203.8" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#loopArr)"/>
+    <path d="M279.6,123.5 A150,150 0 0,1 333.6,92.3" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#loopArr)"/>
+
+    <!-- center label -->
+    <text x="380" y="222" text-anchor="middle" fill="#3fb950" font-size="15" font-weight="700">your store, kept</text>
+    <text x="380" y="242" text-anchor="middle" fill="#3fb950" font-size="15" font-weight="700">correct &amp; useful</text>
+    <text x="380" y="266" text-anchor="middle" fill="#8b98a9" font-size="11">local · SQLite · reversible</text>
+
+    <!-- 1 INJECT (top) -->
+    <rect x="305" y="58" width="150" height="54" rx="10" fill="#121722" stroke="#26324a"/>
+    <text x="380" y="80" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="650">1 · inject</text>
+    <text x="380" y="97" text-anchor="middle" fill="#8b98a9" font-size="11">lessons + current truth</text>
+    <text x="380" y="50" text-anchor="middle" fill="#3fb950" font-size="10">session-start hook</text>
+
+    <!-- 2 ACT (upper right) -->
+    <rect x="435" y="133" width="150" height="54" rx="10" fill="#121722" stroke="#1e2636"/>
+    <text x="510" y="155" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="650">2 · act</text>
+    <text x="510" y="172" text-anchor="middle" fill="#8b98a9" font-size="11">recall / remember</text>
+    <text x="528" y="124" text-anchor="middle" fill="#58a6ff" font-size="10">MCP tools</text>
+
+    <!-- 3 CAPTURE (lower right) -->
+    <rect x="435" y="283" width="150" height="54" rx="10" fill="#121722" stroke="#26324a"/>
+    <text x="510" y="305" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="650">3 · capture</text>
+    <text x="510" y="322" text-anchor="middle" fill="#8b98a9" font-size="11">failures → lessons</text>
+    <text x="510" y="352" text-anchor="middle" fill="#f0883e" font-size="10">post-tool hook</text>
+
+    <!-- 4 RECONCILE (bottom) -->
+    <rect x="305" y="358" width="150" height="54" rx="10" fill="#121722" stroke="#1e2636"/>
+    <text x="380" y="380" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="650">4 · reconcile</text>
+    <text x="380" y="397" text-anchor="middle" fill="#8b98a9" font-size="11">dedup · supersede</text>
+    <text x="380" y="427" text-anchor="middle" fill="#8b98a9" font-size="10">on remember</text>
+
+    <!-- 5 VERIFY (lower left) -->
+    <rect x="175" y="283" width="150" height="54" rx="10" fill="#121722" stroke="#26324a"/>
+    <text x="250" y="305" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="650">5 · verify</text>
+    <text x="250" y="322" text-anchor="middle" fill="#8b98a9" font-size="11">probe recall first</text>
+    <text x="250" y="352" text-anchor="middle" fill="#f0883e" font-size="10">guardrail</text>
+
+    <!-- 6 FORGET (upper left) -->
+    <rect x="175" y="133" width="150" height="54" rx="10" fill="#121722" stroke="#1e2636"/>
+    <text x="250" y="155" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="650">6 · forget</text>
+    <text x="250" y="172" text-anchor="middle" fill="#8b98a9" font-size="11">decay · prune noise</text>
+    <text x="250" y="125" text-anchor="middle" fill="#c08bf0" font-size="10">pre-compact / stop</text>
+  </g>
+</svg>

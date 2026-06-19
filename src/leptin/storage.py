@@ -32,7 +32,11 @@ CREATE TABLE IF NOT EXISTS memories (
     reversible_until REAL,
     mtype           TEXT NOT NULL DEFAULT 'fact',  -- fact|procedural|task|lesson
     source_ref      TEXT,                          -- anchor: linear:ABC-123, spec:foo.md#sec, commit:sha
-    stale           INTEGER NOT NULL DEFAULT 0     -- 1 when its source_ref changed
+    stale           INTEGER NOT NULL DEFAULT 0,    -- 1 when its source_ref changed
+    inject_count    INTEGER NOT NULL DEFAULT 0,    -- times injected by recall (usefulness loop)
+    useful_count    INTEGER NOT NULL DEFAULT 0,    -- needed again in a later session / marked useful
+    harmful_count   INTEGER NOT NULL DEFAULT 0,    -- marked harmful (down-weighted)
+    last_inject_session TEXT                        -- session of the last injection
 );
 CREATE INDEX IF NOT EXISTS idx_mem_status  ON memories(status);
 CREATE INDEX IF NOT EXISTS idx_mem_subject ON memories(subject);
@@ -126,7 +130,7 @@ def _new_id() -> str:
 
 
 # --- schema migrations -------------------------------------------------------
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -159,7 +163,15 @@ def _migration_3(conn: sqlite3.Connection) -> None:
     _add_column(conn, "memories", "stale", "INTEGER NOT NULL DEFAULT 0")
 
 
-_MIGRATIONS = {1: _migration_1, 2: _migration_2, 3: _migration_3}
+def _migration_4(conn: sqlite3.Connection) -> None:
+    """v1.2: recall-usefulness loop counters."""
+    _add_column(conn, "memories", "inject_count", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "memories", "useful_count", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "memories", "harmful_count", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "memories", "last_inject_session", "TEXT")
+
+
+_MIGRATIONS = {1: _migration_1, 2: _migration_2, 3: _migration_3, 4: _migration_4}
 
 
 class Store:

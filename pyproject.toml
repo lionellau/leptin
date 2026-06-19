@@ -1,7 +1,7 @@
 [project]
 name = "leptin-mcp"
-version = "1.1.0"
-description = "The satiety hormone for agent memory — a drop-in MCP memory server that puts your agent's long-term memory on a token budget, shows the receipts, and guarantees it never silently forgot anything."
+version = "1.2.0"
+description = "A local-first control loop for agent memory — runs on your coding agent's harness hooks to keep long-term memory correct and useful: resolves contradictions, captures lessons, learns what helps, and never forgets without proving recall is preserved."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
