@@ -13,6 +13,6 @@ from leptin.config import Config
 from leptin.engine import DietEngine
 from leptin.storage import Store
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 __all__ = ["Config", "DietEngine", "Store", "__version__"]

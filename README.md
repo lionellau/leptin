@@ -6,6 +6,8 @@
 
 **A drop-in MCP memory server that puts your agent's long-term memory on a token budget, shows you the receipts, and guarantees it never silently forgot anything that mattered.**
 
+[![version](https://img.shields.io/badge/version-1.0.0-3fb950)](CHANGELOG.md)
+[![status](https://img.shields.io/badge/status-production%2Fstable-3fb950)](#)
 [![tests](https://img.shields.io/badge/tests-99%20passing-3fb950)](#testing)
 [![self-tuning](https://img.shields.io/badge/self--tuning-closed--loop-3fb950)](#-self-tuning-leptin-learns-its-own-diet)
 [![benchmark](https://img.shields.io/badge/LoCoMo--mini-66%25%20fewer%20tokens%20%40%200%25%20recall%20loss-3fb950)](#the-headline-reproduce-it-yourself)
@@ -289,10 +291,13 @@ uv venv && uv pip install -e ".[dev]" && pytest
 
 ## Roadmap
 
-- **v0.1:** MCP server + tools · SQLite backend · dedup/merge · decay · budgeted packed recall · savings ledger · recall guardrail + reversibility · `leptin bench` · local dashboard · `@leptin/client` TS SDK.
-- **v0.2 (now):** 🧬 **self-tuning** — closed-loop policy evolution with held-out evals, evolution ledger + rollback, meta-guardrail; merge/supersede-on-compact; offline zero-cost.
-- **v0.3 (next):** async tuning daemon · hosted prompt/intent optimization (opt-in) · recency-of-miss probe sampling · Mem0 adapter · `sqlite-vec` fast path.
-- **Later:** pgvector / knowledge-graph backends · shared/team memory.
+**Shipped in v1.0** — the complete product:
+MCP server + 8 tools · SQLite backend (zero infra) · write-time dedup/merge/supersede · time-decay · token-budgeted packed recall · savings ledger · identity-based recall guardrail + reversibility · 🧬 **closed-loop self-tuning** (held-out evals, evolution ledger + rollback, meta-guardrail) · reproducible `leptin bench` · local dashboard · `@leptin/client` TS SDK · graceful offline↔hosted degradation · 99 tests + CI.
+
+**Forward roadmap** (enhancements, not gaps):
+- Backend adapters — Mem0 and pgvector (diet a store you already run) · `sqlite-vec` fast path.
+- Hosted prompt/intent optimization for self-tuning (opt-in) · async tuning daemon.
+- Shared/team memory · knowledge-graph backend.
 
 ---
 

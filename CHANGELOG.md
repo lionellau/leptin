@@ -4,6 +4,24 @@ All notable changes to Leptin are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] — 2026-06-19
+
+**First stable release.** Leptin is feature-complete for its PRD scope and
+production-ready: a drop-in MCP memory server with token-budgeted recall, an
+auditable savings ledger, an identity-based recall guardrail, glass-box
+reversibility, a reproducible offline benchmark, a local dashboard, a TypeScript
+SDK, and closed-loop **self-tuning**. Zero required dependencies; runs fully
+offline; 99 tests; CI on Python 3.10–3.13.
+
+This release promotes the complete, twice-audited feature set below (0.1.0 +
+0.2.0) to stable — API and on-disk schema are now considered committed under
+semantic versioning. No functional change from 0.2.0 beyond the version,
+the Production/Stable classifier, and documentation.
+
+The forward roadmap (backend adapters for Mem0/pgvector, hosted prompt/intent
+tuning, async tuning daemon, `sqlite-vec` fast path) is post-1.0 enhancement
+work; none of it is required for the product to be complete and useful today.
+
 ## [0.2.0] — 2026-06-19
 
 ### Added — 🧬 Self-tuning (closed-loop self-evolution; PRD §13)
