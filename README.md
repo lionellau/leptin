@@ -169,7 +169,7 @@ Concretely, the kind of thing that bites real projects:
 - **Multi-agent / multi-session setups.** Several agents hammering one memory store re-inject the same boilerplate constantly. Dedup + a token ceiling caps the blast radius.
 - **"Just turn on forgetting."** Decay alone is dangerous — the fact you query once a month is exactly the one a dumb decay scanner deletes. Leptin only prunes behind the **recall guardrail**, and quarantines (never hard-deletes) within a retention window, so forgetting is safe and reversible.
 
-The decay model is the classic **Ebbinghaus forgetting curve** (`strength(t) = strength₀ · e^(−λt)`, reinforced on access) — the same spacing-and-recency intuition human memory uses, applied to keep the *useful* facts strong and let genuinely-cold ones fade. The budgeted packer is a greedy knapsack on relevance-per-token. The guardrail is the part nobody else ships: it turns "forgetting" from a leap of faith into a checked, reversible operation.
+The decay model is the classic **Ebbinghaus forgetting curve** (`strength(t) = strength₀ · e^(−λt)`, reinforced on access) — the same spacing-and-recency intuition human memory uses, applied to keep the *useful* facts strong and let genuinely-cold ones fade. The budgeted packer is a greedy knapsack on relevance-per-token. The recall guardrail is the piece I most wanted and rarely saw: it turns "forgetting" from a leap of faith into a checked, reversible operation.
 
 ---
 
