@@ -4,6 +4,35 @@ All notable changes to Leptin are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-06-20
+
+Repositioned from a token-saving store into a **memory governor**: keep long-term
+memory *correct and current*, and forget only when recall is provably preserved.
+
+### Added
+- **Memory typing** (`fact` / `procedural` / `task` / `lesson`) with per-type decay.
+- **Never-decaying lessons-learned** (`leptin lesson "..."`) — stored once, and
+  **auto-injected at every session start** so the agent stops repeating mistakes.
+- **Provenance anchoring** (`--source-ref`, e.g. `linear:ABC-123`, `spec:foo.md#sec`)
+  + `leptin stale <ref>` to flag memories whose source changed (down-weighted in recall).
+- **Lifecycle hooks** for Claude Code + Codex: `leptin hook <event>` emits memory +
+  lessons as `additionalContext` at SessionStart/UserPromptSubmit, and runs guardrailed
+  compaction at Stop/PreCompact. `leptin connect claude-code|codex` prints the wiring.
+- `session_context` API + `remember_lesson` / `lessons` / `flag_stale`.
+
+### Changed
+- **Lean MCP surface:** only `recall` + `remember` are exposed to the model by default
+  (discipline runs via hooks/CLI, not as model-callable tools). `LEPTIN_MCP_TOOLS=all`
+  restores the full set. Removes per-request tool-schema token overhead.
+- README/positioning reframed outcome-first (correct & current memory; lessons that
+  stick; verified forgetting), and honest about fitting *alongside* storage/compression
+  layers rather than replacing them.
+
+### Migrations
+- Schema v2 → v3 (adds `mtype`, `source_ref`, `stale`); older stores upgrade in place.
+
+Tests: 112 → 122.
+
 ## [1.0.0] — 2026-06-19
 
 **First stable release.** Leptin is feature-complete for its PRD scope and

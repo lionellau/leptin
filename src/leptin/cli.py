@@ -85,7 +85,24 @@ def cmd_remember(args) -> int:
     from leptin.api import Leptin
 
     with Leptin(args.db) as mem:
-        _print_json(mem.remember(args.content, subject=args.subject, source=args.source))
+        _print_json(mem.remember(args.content, subject=args.subject, source=args.source,
+                                 mtype=args.type, source_ref=args.source_ref))
+    return 0
+
+
+def cmd_lesson(args) -> int:
+    from leptin.api import Leptin
+
+    with Leptin(args.db) as mem:
+        _print_json(mem.remember_lesson(args.content, subject=args.subject))
+    return 0
+
+
+def cmd_stale(args) -> int:
+    from leptin.api import Leptin
+
+    with Leptin(args.db) as mem:
+        _print_json(mem.flag_stale(args.source_ref))
     return 0
 
 
@@ -117,6 +134,60 @@ def cmd_dashboard(args) -> int:
     from leptin.dashboard import serve_dashboard
 
     serve_dashboard(args.db, host=args.host, port=args.port)
+    return 0
+
+
+def cmd_hook(args) -> int:
+    """Lifecycle-hook entrypoint for Claude Code / Codex (same field names).
+
+    SessionStart / UserPromptSubmit → emit lessons + relevant memory as
+    `additionalContext` (memory reaches the model with no tool call).
+    Stop / SessionEnd / PreCompact → run guardrailed compaction in the background.
+    Reads the host's hook JSON on stdin; never throws (a hook must not break the session).
+    """
+    from leptin.api import Leptin
+
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except (json.JSONDecodeError, ValueError):
+        payload = {}
+    event = (args.event or payload.get("hook_event_name") or "").lower().replace("_", "-")
+    try:
+        with Leptin(args.db) as mem:
+            if event in ("session-start", "sessionstart", "user-prompt-submit", "userpromptsubmit"):
+                query = payload.get("prompt") or payload.get("user_prompt")
+                ctx = mem.session_context(query=query)
+                text = ctx["text"]
+                if text:
+                    hook_event = "UserPromptSubmit" if "prompt" in event else "SessionStart"
+                    print(json.dumps({"hookSpecificOutput": {
+                        "hookEventName": hook_event, "additionalContext": text}}))
+            elif event in ("stop", "session-end", "sessionend", "pre-compact", "precompact"):
+                mem.compact()  # decay + guardrailed prune; keeps the store clean
+    except Exception:  # noqa: BLE001 — a hook must never break the host session
+        pass
+    return 0
+
+
+def cmd_connect(args) -> int:
+    """Print the host config to wire Leptin's lean MCP surface + lifecycle hooks."""
+    db = args.db
+    leptin = _leptin_command()
+    hooks = {
+        evt: [{"hooks": [{"type": "command", "command": f"{leptin} hook {hk} --db {db}"}]}]
+        for evt, hk in (("SessionStart", "session-start"),
+                        ("UserPromptSubmit", "user-prompt-submit"),
+                        ("Stop", "stop"), ("PreCompact", "pre-compact"))
+    }
+    block = {"mcpServers": {"leptin": {"command": leptin, "args": ["serve", "--db", db]}},
+             "hooks": hooks}
+    host = (args.host or "claude-code").lower()
+    settings = "~/.claude/settings.json" if "claude" in host else "Codex settings (hooks + mcp)"
+    print(f"Add this to your {host} config ({settings}):\n")
+    print(json.dumps(block, indent=2))
+    print("\nThe discipline (compact/decay/guardrail/self-tune) runs via the hooks +")
+    print("the CLI/daemon — only `remember` and `recall` are exposed to the model.")
+    print("Expose every tool with  LEPTIN_MCP_TOOLS=all.")
     return 0
 
 
@@ -269,7 +340,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("content")
     sp.add_argument("--subject")
     sp.add_argument("--source")
+    sp.add_argument("--type", default="fact", choices=["fact", "procedural", "task", "lesson"],
+                    help="Memory type (default fact). 'lesson' never decays.")
+    sp.add_argument("--source-ref", help="Anchor: linear:ABC-123, spec:auth.md#flow, commit:sha.")
     sp.set_defaults(func=cmd_remember)
+
+    sp = sub.add_parser("lesson", help="Store a never-forgotten lesson / anti-pattern.")
+    add_db(sp)
+    sp.add_argument("content")
+    sp.add_argument("--subject")
+    sp.set_defaults(func=cmd_lesson)
+
+    sp = sub.add_parser("stale", help="Flag memories anchored to a changed source as stale.")
+    add_db(sp)
+    sp.add_argument("source_ref", help="e.g. linear:ABC-123 or spec:auth.md#flow")
+    sp.set_defaults(func=cmd_stale)
+
+    sp = sub.add_parser("hook", help="Lifecycle-hook entrypoint for Claude Code / Codex.")
+    add_db(sp)
+    sp.add_argument("event", nargs="?", help="session-start | user-prompt-submit | stop | pre-compact")
+    sp.set_defaults(func=cmd_hook)
+
+    sp = sub.add_parser("connect", help="Print host config to wire hooks + lean MCP.")
+    add_db(sp)
+    sp.add_argument("host", nargs="?", default="claude-code", help="claude-code | codex")
+    sp.set_defaults(func=cmd_connect)
 
     sp = sub.add_parser("recall", help="Recall memories under a token budget.")
     add_db(sp)

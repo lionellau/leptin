@@ -9,6 +9,7 @@ go to stderr; only protocol messages go to stdout.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 from typing import Any, Callable, Optional
@@ -24,16 +25,22 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "remember",
         "description": (
-            "Store a fact in long-term memory. Runs write-time dedup/merge: "
-            "near-duplicates are merged and contradictions supersede the older "
-            "fact instead of piling up. Returns the action taken and tokens saved."
+            "Store something in long-term memory. Write-time dedup/merge keeps it "
+            "clean, and contradictions supersede the older fact. Set mtype='lesson' "
+            "for a never-forgotten anti-pattern/lesson; 'task' for ticket-scoped "
+            "notes that fade. source_ref anchors it to a spec/ticket so it can be "
+            "flagged stale when the source changes."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "The fact to remember."},
+                "content": {"type": "string", "description": "The thing to remember."},
                 "subject": {"type": "string", "description": "Optional topic/subject grouping."},
                 "source": {"type": "string", "description": "Optional provenance note."},
+                "mtype": {"type": "string", "enum": ["fact", "procedural", "task", "lesson"],
+                          "description": "Memory type (default fact). 'lesson' never decays."},
+                "source_ref": {"type": "string",
+                               "description": "Anchor: e.g. linear:ABC-123, spec:auth.md#flow, commit:sha."},
             },
             "required": ["content"],
         },
@@ -132,6 +139,18 @@ TOOLS: list[dict[str, Any]] = [
     },
 ]
 
+# Lean default surface: only what the *model* should call lives in the tool list
+# (every tool schema is a standing per-request token tax). Discipline tools
+# (compact/forget/restore/inspect/diet_report/self_tune) run via hooks/CLI, not
+# the model — expose them only with LEPTIN_MCP_TOOLS=all.
+LEAN_TOOLS = {"remember", "recall"}
+
+
+def visible_tools() -> list[dict[str, Any]]:
+    if os.environ.get("LEPTIN_MCP_TOOLS", "lean").lower() == "all":
+        return TOOLS
+    return [t for t in TOOLS if t["name"] in LEAN_TOOLS]
+
 
 class MCPServer:
     def __init__(self, mem: Leptin, out=None, err=None):
@@ -139,8 +158,11 @@ class MCPServer:
         self.out = out or sys.stdout
         self.err = err or sys.stderr
         self.initialized = False
+        self.tools = visible_tools()
         self._handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
-            "remember": lambda a: mem.remember(a.get("content", ""), a.get("subject"), a.get("source")),
+            "remember": lambda a: mem.remember(a.get("content", ""), a.get("subject"),
+                                               a.get("source"), a.get("mtype", "fact"),
+                                               a.get("source_ref")),
             "recall": lambda a: mem.recall(a.get("query", ""), a.get("token_budget"), a.get("k")),
             "compact": lambda a: mem.compact(bool(a.get("dry_run", False))),
             "forget": lambda a: mem.forget(a.get("memory_id"), a.get("query")),
@@ -193,7 +215,7 @@ class MCPServer:
             if not is_notification:
                 self._result(msg_id, {})
         elif method == "tools/list":
-            self._result(msg_id, {"tools": TOOLS})
+            self._result(msg_id, {"tools": self.tools})
         elif method == "tools/call":
             self._call_tool(msg_id, params)
         elif method in ("notifications/cancelled",):

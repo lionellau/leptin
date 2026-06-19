@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS memories (
     superseded_by   TEXT,
     source_session  TEXT,
     provenance      TEXT,
-    reversible_until REAL
+    reversible_until REAL,
+    mtype           TEXT NOT NULL DEFAULT 'fact',  -- fact|procedural|task|lesson
+    source_ref      TEXT,                          -- anchor: linear:ABC-123, spec:foo.md#sec, commit:sha
+    stale           INTEGER NOT NULL DEFAULT 0     -- 1 when its source_ref changed
 );
 CREATE INDEX IF NOT EXISTS idx_mem_status  ON memories(status);
 CREATE INDEX IF NOT EXISTS idx_mem_subject ON memories(subject);
@@ -123,7 +126,7 @@ def _new_id() -> str:
 
 
 # --- schema migrations -------------------------------------------------------
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -149,7 +152,14 @@ def _migration_2(conn: sqlite3.Connection) -> None:
     return None
 
 
-_MIGRATIONS = {1: _migration_1, 2: _migration_2}
+def _migration_3(conn: sqlite3.Connection) -> None:
+    """v1.1: memory typing, provenance anchoring, and staleness."""
+    _add_column(conn, "memories", "mtype", "TEXT NOT NULL DEFAULT 'fact'")
+    _add_column(conn, "memories", "source_ref", "TEXT")
+    _add_column(conn, "memories", "stale", "INTEGER NOT NULL DEFAULT 0")
+
+
+_MIGRATIONS = {1: _migration_1, 2: _migration_2, 3: _migration_3}
 
 
 class Store:
@@ -221,21 +231,37 @@ class Store:
         source_session: Optional[str] = None,
         provenance: Optional[str] = None,
         memory_id: Optional[str] = None,
+        mtype: str = "fact",
+        source_ref: Optional[str] = None,
     ) -> dict[str, Any]:
         mid = memory_id or _new_id()
         now = self.now()
         self.conn.execute(
             """INSERT INTO memories
                (id, subject, content, embedding, tokens, strength, created_at,
-                last_accessed_at, access_count, status, source_session, provenance)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                last_accessed_at, access_count, status, source_session, provenance,
+                mtype, source_ref)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 mid, subject, content, json.dumps(embedding), tokens, strength,
-                now, now, 0, "active", source_session, provenance,
+                now, now, 0, "active", source_session, provenance, mtype, source_ref,
             ),
         )
         self._emb_cache[mid] = list(embedding)  # seed the cache
         return self.get_memory(mid)  # type: ignore[return-value]
+
+    def flag_stale(self, source_ref: str) -> list[str]:
+        """Mark every active memory anchored to source_ref as stale; return ids."""
+        rows = self.conn.execute(
+            "SELECT id FROM memories WHERE source_ref=? AND status='active'", (source_ref,)
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+        if ids:
+            self.conn.execute(
+                "UPDATE memories SET stale=1 WHERE source_ref=? AND status='active'",
+                (source_ref,),
+            )
+        return ids
 
     def _parse_row(self, row: sqlite3.Row) -> dict[str, Any]:
         """Row → dict, using the embedding cache to avoid re-parsing JSON vectors."""

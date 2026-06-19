@@ -70,12 +70,30 @@ class Leptin:
 
     # --- tool surface (delegates) ---
     def remember(self, content: str, subject: Optional[str] = None,
-                 source: Optional[str] = None) -> dict[str, Any]:
-        return self.engine.remember(content, subject=subject, source=source)
+                 source: Optional[str] = None, mtype: str = "fact",
+                 source_ref: Optional[str] = None) -> dict[str, Any]:
+        return self.engine.remember(content, subject=subject, source=source,
+                                    mtype=mtype, source_ref=source_ref)
+
+    def remember_lesson(self, content: str, subject: Optional[str] = None,
+                        source: Optional[str] = None) -> dict[str, Any]:
+        """Store a never-decaying lesson / anti-pattern (proactively re-injected)."""
+        return self.engine.remember(content, subject=subject, source=source,
+                                    mtype="lesson")
 
     def recall(self, query: str, token_budget: Optional[int] = None,
                k: Optional[int] = None) -> dict[str, Any]:
         return self.engine.recall(query, token_budget=token_budget, k=k)
+
+    def session_context(self, query: Optional[str] = None,
+                        token_budget: Optional[int] = None) -> dict[str, Any]:
+        return self.engine.session_context(query=query, token_budget=token_budget)
+
+    def lessons(self) -> list[dict[str, Any]]:
+        return self.engine.lessons()
+
+    def flag_stale(self, source_ref: str) -> dict[str, Any]:
+        return self.engine.flag_stale(source_ref)
 
     def compact(self, dry_run: bool = False) -> dict[str, Any]:
         return self.engine.compact(dry_run=dry_run)

@@ -32,6 +32,17 @@ _WORD = re.compile(r"[a-z0-9']+")
 MAX_CONTENT_CHARS = 20_000  # guard against pathological inputs
 _log = get_logger("engine")
 
+# Memory types and how fast each decays, as a multiple of decay_half_life_days.
+# None = never decays. Lessons must persist; task notes fade with the task.
+MEMORY_TYPES = ("fact", "procedural", "task", "lesson")
+_TYPE_HALFLIFE_MULT: dict[str, Optional[float]] = {
+    "fact": 1.0,        # facts/conventions — normal decay
+    "procedural": 2.0,  # how-to/workflows — slow decay
+    "task": 0.4,        # tied to a ticket — fades faster
+    "lesson": None,     # lessons-learned / anti-patterns — never decay
+}
+_STALE_PENALTY = 0.25   # down-weight (don't hide) memories whose source changed
+
 
 class DietEngine:
     def __init__(
@@ -157,8 +168,7 @@ class DietEngine:
         self._merger_offline = True
         return self.merger.decide(older, newer, sim)
 
-    def _decay_factor(self, last_accessed: float, now: float) -> float:
-        half = self.config.decay_half_life_days
+    def _decay_factor(self, last_accessed: float, now: float, half: float) -> float:
         if half <= 0:
             return 1.0
         days = max(0.0, (now - last_accessed) / 86400.0)
@@ -166,7 +176,13 @@ class DietEngine:
 
     def effective_strength(self, mem: dict[str, Any], now: Optional[float] = None) -> float:
         now = self.store.now() if now is None else now
-        return float(mem["strength"]) * self._decay_factor(mem["last_accessed_at"], now)
+        mult = _TYPE_HALFLIFE_MULT.get(mem.get("mtype", "fact"), 1.0)
+        if mult is None:
+            # Lessons-learned / anti-patterns never decay — they must stay
+            # available so the agent stops repeating known mistakes.
+            return float(mem["strength"])
+        half = self.config.decay_half_life_days * mult
+        return float(mem["strength"]) * self._decay_factor(mem["last_accessed_at"], now, half)
 
     def _keyword_sim(self, a: str, b: str) -> float:
         wa = set(_WORD.findall(a.lower()))
@@ -190,8 +206,11 @@ class DietEngine:
         for m in self.store.list_memories(status="active"):
             sim = self._similarity(query, qemb, m)
             strength = self.effective_strength(m, now)
+            score = sim * strength
+            if m.get("stale"):
+                score *= _STALE_PENALTY  # source changed — down-weight, don't hide
             out.append(
-                {"score": sim * strength, "sim": sim, "strength": strength, "memory": m}
+                {"score": score, "sim": sim, "strength": strength, "memory": m}
             )
         out.sort(key=lambda r: (r["score"], r["sim"]), reverse=True)
         return out
@@ -245,7 +264,8 @@ class DietEngine:
 
     # --------------------------------------------------------------- remember
     def remember(
-        self, content: str, subject: Optional[str] = None, source: Optional[str] = None
+        self, content: str, subject: Optional[str] = None, source: Optional[str] = None,
+        mtype: str = "fact", source_ref: Optional[str] = None,
     ) -> dict[str, Any]:
         content = (content or "").strip()
         if not content:
@@ -253,16 +273,18 @@ class DietEngine:
                     "reason": "empty content"}
         if len(content) > MAX_CONTENT_CHARS:
             content = content[:MAX_CONTENT_CHARS]
+        if mtype not in MEMORY_TYPES:
+            mtype = "fact"
 
         new_tokens = self._tok(content)
         emb = self._embed(content)
 
-        # Subject-aware scoring against existing memories (None subject is its
-        # own group). We only attempt dedup/supersede when we have an embedding.
+        # Dedup/supersede only against same subject AND same type, so a lesson
+        # never merges into a fact (typing partitions the belief space).
         scored: list[tuple[float, dict[str, Any]]] = []
         if emb:
             for m in self.store.list_memories(status="active"):
-                if m.get("subject") != subject:
+                if m.get("subject") != subject or m.get("mtype", "fact") != mtype:
                     continue
                 scored.append((self._similarity(content, emb, m), m))
             scored.sort(key=lambda x: x[0], reverse=True)
@@ -274,7 +296,7 @@ class DietEngine:
             if decision.action == "supersede":
                 stale = self._contradicting(scored, content)
                 return self._supersede(stale or [best], content, emb, new_tokens,
-                                       subject, source, decision.reason)
+                                       subject, source, decision.reason, mtype, source_ref)
             return self._merge(best, content, emb, new_tokens, decision.reason)
 
         # 2) Lower-similarity contradiction (same subject, conflicting facts):
@@ -282,18 +304,19 @@ class DietEngine:
         stale = self._contradicting(scored, content)
         if stale:
             return self._supersede(stale, content, emb, new_tokens, subject, source,
-                                   "newer fact contradicts existing memory")
+                                   "newer fact contradicts existing memory", mtype, source_ref)
 
         # 3) No duplicate → create.
         mem = self.store.add_memory(
             content=content, embedding=emb, tokens=new_tokens, subject=subject,
             source_session=self.session_id, provenance=source,
+            mtype=mtype, source_ref=source_ref,
         )
         self.store.add_event(mem["id"], "create", reason=source or "new memory",
                              token_delta=new_tokens)
         self._log_footprint("remember", reduced=0,
-                            detail={"action": "created", "memory_id": mem["id"]})
-        return {"action": "created", "memory_id": mem["id"], "tokens_saved": 0}
+                            detail={"action": "created", "memory_id": mem["id"], "mtype": mtype})
+        return {"action": "created", "memory_id": mem["id"], "tokens_saved": 0, "mtype": mtype}
 
     def _merge(self, best, content, emb, new_tokens, reason) -> dict[str, Any]:
         now = self.store.now()
@@ -330,11 +353,13 @@ class DietEngine:
             if sim >= floor and detect_contradiction(m["content"], content)
         ]
 
-    def _supersede(self, olds, content, emb, new_tokens, subject, source, reason) -> dict[str, Any]:
+    def _supersede(self, olds, content, emb, new_tokens, subject, source, reason,
+                   mtype: str = "fact", source_ref: Optional[str] = None) -> dict[str, Any]:
         now = self.store.now()
         mem = self.store.add_memory(
             content=content, embedding=emb, tokens=new_tokens, subject=subject,
             strength=1.0, source_session=self.session_id, provenance=source,
+            mtype=mtype, source_ref=source_ref,
         )
         superseded_ids = []
         old_tokens = 0
@@ -484,7 +509,10 @@ class DietEngine:
         actives = self.store.list_memories(status="active")
         decay_ids = {
             m["id"] for m in actives
-            if self.effective_strength(m, now) < self.config.strength_floor
+            # Lessons never decay-prune (their effective_strength never drops),
+            # but guard explicitly so they're never decay-eligible.
+            if m.get("mtype") != "lesson"
+            and self.effective_strength(m, now) < self.config.strength_floor
         }
         decayed = [m for m in actives if m["id"] in decay_ids]
 
@@ -731,6 +759,64 @@ class DietEngine:
         """Self-tuning summary block (None until the tuner has run)."""
         return self.tuner.report() if getattr(self, "tuner", None) else None
 
+    # ----------------------------------------------------- provenance / context
+    def flag_stale(self, source_ref: str) -> dict[str, Any]:
+        """Mark memories anchored to a source that changed as stale (not deleted).
+
+        Stale memories are down-weighted in recall and surfaced for review — the
+        answer to 'a fact is confidently wrong once its source changed'."""
+        ids = self.store.flag_stale(source_ref)
+        for mid in ids:
+            self.store.add_event(mid, "decay", reason=f"source changed: {source_ref}")
+        return {"flagged": ids, "count": len(ids), "source_ref": source_ref}
+
+    def lessons(self) -> list[dict[str, Any]]:
+        """All active lessons-learned / anti-patterns (never-decaying)."""
+        return [self._public_memory(m)
+                for m in self.store.list_memories(status="active")
+                if m.get("mtype") == "lesson"]
+
+    def session_context(self, query: Optional[str] = None,
+                        token_budget: Optional[int] = None) -> dict[str, Any]:
+        """What to inject at SessionStart: every lesson-learned, plus the most
+        relevant memories for the query (if any), packed under a budget.
+
+        This is the hook-injection surface — it is how memory reaches the model
+        without the model having to call a tool."""
+        now = self.store.now()
+        budget = int(token_budget or self.config.token_budget_default)
+        lessons = [m for m in self.store.list_memories(status="active")
+                   if m.get("mtype") == "lesson"]
+        injected = list(lessons)
+        if query:
+            ranked = self._rank(query, now)
+            for r in ranked:
+                if r["sim"] <= 0 or r["memory"].get("mtype") == "lesson":
+                    continue
+                candidate = injected + [r["memory"]]
+                if self._mtok(candidate) <= budget:
+                    injected.append(r["memory"])
+        return {
+            "lessons": [self._public_memory(m) for m in lessons],
+            "memories": [self._public_memory(m) for m in injected if m.get("mtype") != "lesson"],
+            "text": self._format_context(lessons, [m for m in injected if m.get("mtype") != "lesson"]),
+            "tokens": self._mtok(injected),
+        }
+
+    def _format_context(self, lessons: list[dict[str, Any]],
+                        memories: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        if lessons:
+            lines.append("Lessons learned (do not repeat these):")
+            lines += [f"- {m['content']}" for m in lessons]
+        if memories:
+            if lines:
+                lines.append("")
+            lines.append("Relevant memory:")
+            lines += [f"- {(m.get('subject') + ': ') if m.get('subject') else ''}{m['content']}"
+                      + (" [stale]" if m.get("stale") else "") for m in memories]
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------ views
     def _public_memory(self, mem: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -741,4 +827,7 @@ class DietEngine:
             "strength": round(self.effective_strength(mem), 4),
             "status": mem["status"],
             "access_count": mem["access_count"],
+            "mtype": mem.get("mtype", "fact"),
+            "source_ref": mem.get("source_ref"),
+            "stale": bool(mem.get("stale")),
         }

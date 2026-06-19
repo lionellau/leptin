@@ -47,11 +47,11 @@ def client(tmp_path):
     assert c.close() == 0
 
 
-def test_subprocess_lists_all_tools(client):
+def test_subprocess_lists_lean_tools(client):
+    # Default surface is lean: only what the model should call.
     resp = client.call({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in resp["result"]["tools"]}
-    assert names == {"remember", "recall", "compact", "forget", "restore",
-                     "inspect", "diet_report", "self_tune"}
+    assert names == {"remember", "recall"}
 
 
 def test_subprocess_remember_and_recall_roundtrip(client):
