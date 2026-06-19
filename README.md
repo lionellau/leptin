@@ -40,23 +40,24 @@ Plenty of good tools address pieces of this. **Leptin's bet is to put the whole 
 
 ## Why I built this
 
-> *(This is the project's origin story. If you're reading the code, this is the "why".)*
+> *(The origin story — the "why" behind the code.)*
 
-I build with AI coding agents every day. Like everyone, I got tired of my agent forgetting everything between sessions — the stack, my preferences, the decisions we'd already made — so I bolted on a persistent-memory MCP server. It worked. For about a week.
+I build with AI coding agents every day, so I add a memory MCP server to stop re-teaching my agent the same stack, preferences, and decisions each session.
 
-Then sessions started getting **slower and more expensive**. As the store grew, `recall` injected a bigger pile of matched memories into the context window on most turns. A top-k recall of ~10 memories at a few hundred tokens each adds up to thousands of tokens per query — paid over and over, brushing against context limits, reaching for `/compact`. The thing I added to *help* my agent was now quietly competing with it for context, and I didn't have an easy way to see what it was costing me.
+Two things started bothering me as the store grew. First, **`recall` quality rotted.** A store accumulates duplicates, restatements, and stale or contradictory facts, so when the agent *did* call `recall` it got back a bloated, noisy blob — and because a tool result stays in the conversation, that blob then rode along for the rest of the session. (To be precise: MCP memory is *pull* — the model calls `recall` when it wants it, it is not auto-injected every turn. But a fat, junky recall is real, and it lingers.) Second, **I had no visibility or control:** no ceiling on how big a recall could get, no number on what it cost, and the layers that prune did it blindly — I couldn't see what was dropped or get it back.
 
-The agent-memory ecosystem is genuinely good and moving fast, and several tools already tackle parts of this well — some add token controls, some ship dashboards, some prune old memories. I'm not claiming nobody has solved it. What I couldn't find was *one drop-in piece* that combined the specific things I wanted, for the way I actually work: a solo dev running coding agents all day against a **local** store I'd rather not migrate off of.
+The agent-memory space is good and moving fast; several tools already do parts of this well. I just wanted one small, **local-first** piece that did four things together, for how I actually work (a solo dev on a local SQLite store I'd rather not migrate off of):
 
-The combination I wanted:
+1. keep the store **lean** automatically (dedup / merge / decay) so recall stays clean;
+2. **cap and pack** what `recall` returns under a token budget;
+3. **show me the numbers** — tokens and dollars, on my own data;
+4. turn on **forgetting without fear** — every prune checked and reversible.
 
-1. Keep memory **lean** automatically (dedup, merge, decay).
-2. **Show me the bill** — tokens and dollars, on *my own* data, not a benchmark slide.
-3. **Forget safely** — never silently lose something I'd need, and let me undo anything.
+So I built Leptin to scratch that itch. It is not trying to replace the bigger memory platforms; it is the lean sidecar I wanted.
 
-So I built Leptin to scratch that itch — a focused, local-first, zero-dependency take aimed at people whose setup looks like mine. It's not trying to replace the bigger memory platforms; it's the lean sidecar I wanted. I cleaned it up, wrote tests, made the headline reproducible with one command, and published it in case it helps you too.
+**Honest scope (so I don't oversell it):** the win is a *smaller, cleaner `recall` payload* — the benchmark measures exactly that (~60% vs a naive top-k dump) — plus a store that doesn't rot. It is **not** "saves you on every prompt." With prompt caching, re-sent history is already discounted; Leptin's job is to make the part you *do* inject smaller and keep it from filling with junk. The one fixed cost Leptin adds is its tool definitions in each request (they sit in the cached prefix); a lean tool-surface mode for setups where that matters is on the roadmap.
 
-*— [@lionellau](https://github.com/lionellau). PRs, issues, and "this saved me X tokens" stories all welcome.*
+*— [@lionellau](https://github.com/lionellau). PRs, issues, and "this saved me X tokens" stories welcome.*
 
 ---
 
@@ -206,21 +207,21 @@ leptin tune --rollback    # undo the last change, exactly
 
 ---
 
-## Where Leptin fits
+## Is Leptin for you?
 
-Other memory tools are good at what they do — this isn't a teardown, it's about which *combination* Leptin focuses on. Compared to the common **approaches** (not any one product):
+Other memory tools are good at what they do — this isn't a teardown. Leptin is a small, **local, auditable sidecar**, so it's a genuine fit for some setups and overkill for others. Being honest about which:
 
-| | Top-k memory store | Hosted memory platform | Decay-based "forgetting" | **Leptin** |
-|---|:--:|:--:|:--:|:--:|
-| Persistent memory across sessions | ✅ | ✅ | ✅ | ✅ |
-| Hard **token budget** on recall | usually no | sometimes | usually no | ✅ |
-| **Savings ledger** (tokens & $ on *your* data) | rare | rare | rare | ✅ |
-| Forgetting with a **recall guardrail + rollback** | n/a | rare | rare | ✅ |
-| Self-tuning policy | no | no | no | ✅ |
-| Local sidecar, no migration, zero infra | partial | no | varies | ✅ |
-| Runs fully offline, zero deps | varies | no | varies | ✅ |
+**Probably a fit if:**
+- you run a coding agent against a growing **local** memory store and want `recall` to stay lean and clean;
+- you want to *see* what your memory layer costs (tokens + $) on your own data;
+- you want decay / forgetting you can trust — checked and reversible — not a blind scanner.
 
-If you need a full managed memory platform, use one. Leptin is the lean, local, auditable sidecar for when you don't.
+**Probably not, if:**
+- you want a fully managed, hosted, team memory platform with a UI — use one of those;
+- your store is small or you rarely call `recall` — the gains (and the point) are small;
+- you need deep *semantic* dedup with zero setup — that needs hosted embeddings (Leptin supports them; the zero-key default is lexical).
+
+Leptin plays *alongside* your stack, not as a replacement for a memory platform.
 
 ---
 
