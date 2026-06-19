@@ -24,12 +24,12 @@
 
 ---
 
-Persistent-memory MCP servers fixed *"the agent forgets between sessions."* But they created a new, invisible problem: **the memory store silently inflates every prompt and bills you for it.** As the store grows, each `recall` dumps more matched memories into context — eating the very window it was meant to protect — and you have **zero visibility** into the cost. The few tools that *do* forget make you migrate your whole stack and give you **no proof** that forgetting didn't drop something important.
+Persistent-memory MCP servers fixed *"the agent forgets between sessions."* But for many setups they introduce a quieter problem: **the memory store can inflate every prompt and bill you for it.** As the store grows, a top-k `recall` tends to inject more matched memories into context — eating the very window it was meant to protect — and it's often hard to see what that's costing. Turning on forgetting helps, but a plain decay scanner can drop a fact you'll want next week with no easy way to check or undo it.
 
-**Leptin is the missing diet + scale + safety net.** Like the hormone it's named after, it tells your memory store when it's had enough — so it stops hoarding.
+Plenty of good tools address pieces of this. **Leptin's bet is to put the whole loop — diet + scale + safety net — into one lean, local sidecar.** Like the hormone it's named after, it tells your memory store when it's had enough, so it stops hoarding.
 
 ```
-  Other memory layers either grow forever and bill you in the dark,
+  A memory layer can quietly grow forever and bill you in the dark,
   or forget things and hope you don't notice.
 
   Leptin puts your memory on a budget, shows you the receipts,
@@ -44,17 +44,17 @@ Persistent-memory MCP servers fixed *"the agent forgets between sessions."* But 
 
 I build with AI coding agents every day. Like everyone, I got tired of my agent forgetting everything between sessions — the stack, my preferences, the decisions we'd already made — so I bolted on a persistent-memory MCP server. It worked. For about a week.
 
-Then every session started getting **slower and more expensive**. The memory store grew, and `recall` happily dumped a bigger and bigger pile of matched memories into the context window on *every single turn*. A top-k recall of 10 memories at a few hundred tokens each is multiple thousands of tokens injected per query — and I was paying for it over and over, hitting context limits, reaching for `/compact` constantly. The thing I added to *help* my agent was quietly strangling it — and I had no idea how much it was costing me, because **no tool showed me**.
+Then sessions started getting **slower and more expensive**. As the store grew, `recall` injected a bigger pile of matched memories into the context window on most turns. A top-k recall of ~10 memories at a few hundred tokens each adds up to thousands of tokens per query — paid over and over, brushing against context limits, reaching for `/compact`. The thing I added to *help* my agent was now quietly competing with it for context, and I didn't have an easy way to see what it was costing me.
 
-The popular options all share the same retrieve-top-k-and-dump design — the official Memory MCP, mem0, basic-memory — and none of them put a ceiling on it or show you the bill. So I tried the layers that forget. They forgot **blindly**: I couldn't see what they dropped, couldn't get it back, and had no guarantee they hadn't deleted the one fact I'd need next week. And turning them on meant migrating my whole stack onto their platform.
+The agent-memory ecosystem is genuinely good and moving fast, and several tools already tackle parts of this well — some add token controls, some ship dashboards, some prune old memories. I'm not claiming nobody has solved it. What I couldn't find was *one drop-in piece* that combined the specific things I wanted, for the way I actually work: a solo dev running coding agents all day against a **local** store I'd rather not migrate off of.
 
-I wanted three things and could not find them in one tool:
+The combination I wanted:
 
 1. Keep memory **lean** automatically (dedup, merge, decay).
-2. **Show me the bill** — tokens and dollars, on *my* data, not a vendor's slide.
-3. **Never silently lose** something I needed — and let me undo anything.
+2. **Show me the bill** — tokens and dollars, on *my own* data, not a benchmark slide.
+3. **Forget safely** — never silently lose something I'd need, and let me undo anything.
 
-Nothing did all three, so I built Leptin for myself. Then I cleaned it up, wrote tests, made the headline reproducible with one command, and published it — in case it strangles your agent the same way it was strangling mine.
+So I built Leptin to scratch that itch — a focused, local-first, zero-dependency take aimed at people whose setup looks like mine. It's not trying to replace the bigger memory platforms; it's the lean sidecar I wanted. I cleaned it up, wrote tests, made the headline reproducible with one command, and published it in case it helps you too.
 
 *— [@lionellau](https://github.com/lionellau). PRs, issues, and "this saved me X tokens" stories all welcome.*
 
@@ -206,17 +206,21 @@ leptin tune --rollback    # undo the last change, exactly
 
 ---
 
-## How Leptin compares
+## Where Leptin fits
 
-| | Naive memory MCP | Mem0 / hosted stores | "Forgetting" layers | **Leptin** |
+Other memory tools are good at what they do — this isn't a teardown, it's about which *combination* Leptin focuses on. Compared to the common **approaches** (not any one product):
+
+| | Top-k memory store | Hosted memory platform | Decay-based "forgetting" | **Leptin** |
 |---|:--:|:--:|:--:|:--:|
 | Persistent memory across sessions | ✅ | ✅ | ✅ | ✅ |
-| Hard **token budget** on recall | ❌ | ~ | ❌ | ✅ |
-| **Savings ledger** (tokens & $ on your data) | ❌ | ❌ | ❌ | ✅ |
-| Safe forgetting (**guardrail + rollback**) | n/a | ❌ | ❌ | ✅ |
-| Self-tuning policy | ❌ | ❌ | ❌ | ✅ |
-| Sidecar (no migration) / zero infra | ~ | ❌ | ❌ | ✅ |
-| Runs fully offline, zero deps | ❌ | ❌ | ~ | ✅ |
+| Hard **token budget** on recall | usually no | sometimes | usually no | ✅ |
+| **Savings ledger** (tokens & $ on *your* data) | rare | rare | rare | ✅ |
+| Forgetting with a **recall guardrail + rollback** | n/a | rare | rare | ✅ |
+| Self-tuning policy | no | no | no | ✅ |
+| Local sidecar, no migration, zero infra | partial | no | varies | ✅ |
+| Runs fully offline, zero deps | varies | no | varies | ✅ |
+
+If you need a full managed memory platform, use one. Leptin is the lean, local, auditable sidecar for when you don't.
 
 ---
 
