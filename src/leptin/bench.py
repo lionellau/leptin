@@ -150,6 +150,55 @@ def build_corpus() -> dict[str, Any]:
     return {"inserts": inserts, "probes": probes}
 
 
+def load_locomo(path: str, limit: int = 0) -> dict[str, Any]:
+    """Load a real LoCoMo-format dataset into (inserts, probes).
+
+    Handles the common LoCoMo JSON shapes defensively: a list of samples, each
+    with a multi-session ``conversation`` (or ``sessions``) and ``qa`` pairs.
+    Each dialogue turn becomes a memory (subject = speaker); each QA pair becomes
+    a probe (question → answer).
+
+    Note: meaningful recall on real LoCoMo needs **hosted embeddings** — the
+    offline hashing embedder matches lexically, not semantically. Configure
+    ``embedding_model`` (e.g. text-embedding-3-small) for real numbers.
+    """
+    import json
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    samples = data if isinstance(data, list) else data.get("samples") or data.get("data") or [data]
+    if limit:
+        samples = samples[:limit]
+
+    inserts: list[tuple[str, str]] = []
+    probes: list[tuple[str, str]] = []
+    for i, sample in enumerate(samples):
+        conv = sample.get("conversation") or sample.get("sessions") or {}
+        sessions = conv.values() if isinstance(conv, dict) else conv
+        for session in sessions:
+            if not isinstance(session, list):
+                continue
+            for turn in session:
+                if not isinstance(turn, dict):
+                    continue
+                text = turn.get("text") or turn.get("content") or turn.get("clean_text")
+                if not text:
+                    continue
+                speaker = turn.get("speaker") or turn.get("role") or f"sample{i}"
+                inserts.append((str(speaker), str(text)))
+        for qa in (sample.get("qa") or sample.get("qas") or sample.get("questions") or []):
+            if not isinstance(qa, dict):
+                continue
+            q = qa.get("question") or qa.get("q")
+            a = qa.get("answer") or qa.get("a") or qa.get("expected")
+            if q and a is not None:
+                probes.append((str(q), str(a)))
+    if not inserts or not probes:
+        raise ValueError(f"no usable inserts/probes parsed from {path} "
+                         f"(got {len(inserts)} inserts, {len(probes)} probes)")
+    return {"inserts": inserts, "probes": probes}
+
+
 def _make_engine(config: Config) -> tuple[Store, DietEngine]:
     store = Store(":memory:", clock=FIXED_CLOCK)
     engine = DietEngine(store, config)
@@ -161,15 +210,18 @@ def _covered(memories: list[dict[str, Any]], expected: str) -> bool:
     return any(exp in m["content"].lower() for m in memories)
 
 
-def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False) -> dict[str, Any]:
-    corpus = build_corpus()
+def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False,
+        corpus: Optional[dict[str, Any]] = None, embedding_model: str = "local-hash",
+        llm_model: str = "heuristic") -> dict[str, Any]:
+    corpus = corpus or build_corpus()
     inserts = corpus["inserts"]
     probes = corpus["probes"]
 
     # --- Naive store: never merges, no budget cap, no relevance gate; dumps top-k. ---
     naive_cfg = Config(dedup_threshold=2.0, token_budget_default=10**9,
                        recall_k=naive_top_k, naive_top_k=naive_top_k,
-                       recall_rel_floor=0.0, recall_min_sim=0.0)
+                       recall_rel_floor=0.0, recall_min_sim=0.0,
+                       embedding_model=embedding_model, llm_model=llm_model)
     naive_store, naive = _make_engine(naive_cfg)
     t0 = time.perf_counter()
     for subject, content in inserts:
@@ -177,7 +229,8 @@ def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False) -> dic
     naive_insert_s = time.perf_counter() - t0
 
     # --- Leptin store: dedup/merge + budgeted packed recall. ---
-    lep_cfg = Config(token_budget_default=budget, naive_top_k=naive_top_k)
+    lep_cfg = Config(token_budget_default=budget, naive_top_k=naive_top_k,
+                     embedding_model=embedding_model, llm_model=llm_model)
     lep_store, lep = _make_engine(lep_cfg)
     t0 = time.perf_counter()
     for subject, content in inserts:
@@ -269,13 +322,20 @@ def format_table(r: dict[str, Any]) -> str:
         f"  models            : embedding={r['models']['embedding']}, llm={r['models']['llm']}",
         "  driven by         : budgeted, relevance-packed recall + write-time dedup",
         "  baseline          : a naive top-k dump (what stock memory MCPs do today)",
-        "  corpus            : bundled synthetic LoCoMo-style set (illustrative, offline)",
+        f"  corpus            : {r['dataset']} (real LoCoMo dataset)" if r.get("dataset")
+        else "  corpus            : bundled synthetic LoCoMo-style set (illustrative, offline)",
         "",
     ]
     return "\n".join(lines)
 
 
-def main(budget: int = 1500, naive_top_k: int = 10) -> dict[str, Any]:
-    r = run(budget=budget, naive_top_k=naive_top_k)
+def main(budget: int = 1500, naive_top_k: int = 10, dataset: Optional[str] = None,
+         limit: int = 0, embedding_model: str = "local-hash",
+         llm_model: str = "heuristic") -> dict[str, Any]:
+    corpus = load_locomo(dataset, limit=limit) if dataset else None
+    r = run(budget=budget, naive_top_k=naive_top_k, corpus=corpus,
+            embedding_model=embedding_model, llm_model=llm_model)
+    if dataset:
+        r["dataset"] = dataset
     print(format_table(r))
     return r

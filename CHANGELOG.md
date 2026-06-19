@@ -13,10 +13,28 @@ reversibility, a reproducible offline benchmark, a local dashboard, a TypeScript
 SDK, and closed-loop **self-tuning**. Zero required dependencies; runs fully
 offline; 99 tests; CI on Python 3.10–3.13.
 
+### Real-world / production hardening
+- **`leptin doctor`** — health check (store, schema version, memory counts, size,
+  embedding/LLM model + hosted SDK/API-key readiness, self-tuning + guardrail
+  status); exits non-zero if unhealthy.
+- **Schema migrations** — versioned on-disk schema (`PRAGMA user_version`);
+  databases from older versions upgrade in place on open, data preserved.
+- **Concurrency** — `busy_timeout` so the server, dashboard, and CLI share one
+  DB file without "database is locked" errors (multi-writer test).
+- **Scale** — parsed-embedding cache keeps recall in the low-ms over thousands
+  of memories (latency test).
+- **Hardened hosted mode** — embedding/LLM calls retry transient errors with
+  backoff before degrading; per-text embedding cache avoids re-billing; one-time
+  downgrade warning. Never silently degrades.
+- **Structured logging** — `LEPTIN_LOG` level control, stderr only.
+- **Real-dataset benchmark** — `leptin bench --dataset <locomo.json>
+  --embedding-model …` runs the harness on real LoCoMo data (synthetic stays the
+  offline default).
+- Tests: 99 → 112.
+
 This release promotes the complete, twice-audited feature set below (0.1.0 +
 0.2.0) to stable — API and on-disk schema are now considered committed under
-semantic versioning. No functional change from 0.2.0 beyond the version,
-the Production/Stable classifier, and documentation.
+semantic versioning (schema migrations guarantee forward-compatible upgrades).
 
 The forward roadmap (backend adapters for Mem0/pgvector, hosted prompt/intent
 tuning, async tuning daemon, `sqlite-vec` fast path) is post-1.0 enhancement

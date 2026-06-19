@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import re
-import sys
+import time
 import uuid
 from typing import Any, Optional
 
@@ -23,22 +23,14 @@ from leptin.config import Config
 from leptin.embeddings import Embedder, LocalHashingEmbedder, cosine, make_embedder
 from leptin.guardrail import Guardrail, covers
 from leptin.llm import HeuristicMerger, Merger, detect_contradiction, make_merger
+from leptin.logconf import get_logger, warn_once as _warn_once
 from leptin.storage import Store
 from leptin.tokenizer import count_memory_tokens, count_tokens
 from leptin.tuner import Tuner
 
 _WORD = re.compile(r"[a-z0-9']+")
 MAX_CONTENT_CHARS = 20_000  # guard against pathological inputs
-
-_warned: set[str] = set()
-
-
-def _warn_once(key: str, message: str) -> None:
-    """Emit a one-time degradation warning to stderr (never stdout — that's the
-    MCP channel)."""
-    if key not in _warned:
-        _warned.add(key)
-        print(f"[leptin] {message}", file=sys.stderr, flush=True)
+_log = get_logger("engine")
 
 
 class DietEngine:
@@ -64,6 +56,11 @@ class DietEngine:
         self._offline = isinstance(self.embedder, LocalHashingEmbedder)
         self._merger_offline = getattr(self.merger, "name", "") == "heuristic"
         self._tok_model = "heuristic" if self._offline else self.config.price_model
+        # Hosted resilience + cost control.
+        self._hosted_retries = 2          # retry transient API errors before downgrade
+        self._retry_backoff = 0.05        # base seconds; exponential
+        self._embed_cache: dict[str, list[float]] = {}  # text → vector (avoid re-billing)
+        self._embed_cache_max = 2048
 
     # ------------------------------------------------------------------ utils
     def _tok(self, text: str) -> int:
@@ -73,26 +70,58 @@ class DietEngine:
         return count_memory_tokens(memories, self._tok_model)
 
     def _embed(self, text: str) -> list[float]:
-        """Embed with graceful degradation — never raises to the caller."""
-        try:
-            return self.embedder.embed(text)
-        except Exception as exc:
-            # Hosted embedder unreachable / SDK missing: fall back to local so
-            # dedup/recall keep working (the caller also tolerates an empty vector).
+        """Embed with caching, transient-error retry, and graceful degradation.
+
+        Never raises to the caller. For hosted embedders, a transient failure is
+        retried with exponential backoff before downgrading to local — a single
+        429/timeout shouldn't permanently lose semantic embeddings. Results are
+        cached by text so repeated queries / dedup probes aren't re-billed.
+        """
+        cached = self._embed_cache.get(text)
+        if cached is not None:
+            return cached
+
+        if self._offline:
             try:
-                if not self._offline:
-                    _warn_once(
-                        "embed-downgrade",
-                        f"embedding model '{self.config.embedding_model}' unavailable "
-                        f"({type(exc).__name__}); falling back to local-hash embeddings.",
-                    )
-                    self.embedder = LocalHashingEmbedder(self.config.embedding_dim)
-                    self._offline = True
-                    self._tok_model = "heuristic"
-                    return self.embedder.embed(text)
+                vec = self.embedder.embed(text)
             except Exception:
-                pass
+                return []
+            self._cache_embed(text, vec)
+            return vec
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self._hosted_retries + 1):
+            try:
+                vec = self.embedder.embed(text)
+                self._cache_embed(text, vec)
+                return vec
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < self._hosted_retries:
+                    time.sleep(self._retry_backoff * (2 ** attempt))
+
+        # All retries failed → downgrade to local, persistently.
+        _warn_once(
+            "embed-downgrade",
+            f"embedding model '{self.config.embedding_model}' unavailable "
+            f"({type(last_exc).__name__ if last_exc else 'error'}) after "
+            f"{self._hosted_retries + 1} attempts; falling back to local-hash embeddings.",
+        )
+        self.embedder = LocalHashingEmbedder(self.config.embedding_dim)
+        self._offline = True
+        self._tok_model = "heuristic"
+        self._embed_cache.clear()  # local vectors aren't comparable to hosted ones
+        try:
+            vec = self.embedder.embed(text)
+            self._cache_embed(text, vec)
+            return vec
+        except Exception:
             return []
+
+    def _cache_embed(self, text: str, vec: list[float]) -> None:
+        if len(self._embed_cache) >= self._embed_cache_max:
+            self._embed_cache.pop(next(iter(self._embed_cache)), None)  # FIFO evict
+        self._embed_cache[text] = vec
 
     def _settle_embedder(self) -> None:
         """Force any pending hosted→local fallback to happen now, so a sequence of
@@ -108,18 +137,25 @@ class DietEngine:
         to the offline HeuristicMerger persistently (mirrors `_embed`). This is
         the PRD 8.1(d) edge case for the *merge* path.
         """
-        try:
+        if self._merger_offline:
             return self.merger.decide(older, newer, sim)
-        except Exception as exc:
-            if not self._merger_offline:
-                _warn_once(
-                    "merge-downgrade",
-                    f"merge model '{self.config.llm_model}' unavailable "
-                    f"({type(exc).__name__}); falling back to heuristic merge.",
-                )
-                self.merger = HeuristicMerger()
-                self._merger_offline = True
-            return self.merger.decide(older, newer, sim)
+        last_exc: Optional[Exception] = None
+        for attempt in range(self._hosted_retries + 1):
+            try:
+                return self.merger.decide(older, newer, sim)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < self._hosted_retries:
+                    time.sleep(self._retry_backoff * (2 ** attempt))
+        _warn_once(
+            "merge-downgrade",
+            f"merge model '{self.config.llm_model}' unavailable "
+            f"({type(last_exc).__name__ if last_exc else 'error'}) after "
+            f"{self._hosted_retries + 1} attempts; falling back to heuristic merge.",
+        )
+        self.merger = HeuristicMerger()
+        self._merger_offline = True
+        return self.merger.decide(older, newer, sim)
 
     def _decay_factor(self, last_accessed: float, now: float) -> float:
         half = self.config.decay_half_life_days

@@ -8,7 +8,7 @@
 
 [![version](https://img.shields.io/badge/version-1.0.0-3fb950)](CHANGELOG.md)
 [![status](https://img.shields.io/badge/status-production%2Fstable-3fb950)](#)
-[![tests](https://img.shields.io/badge/tests-99%20passing-3fb950)](#testing)
+[![tests](https://img.shields.io/badge/tests-112%20passing-3fb950)](#testing)
 [![self-tuning](https://img.shields.io/badge/self--tuning-closed--loop-3fb950)](#-self-tuning-leptin-learns-its-own-diet)
 [![benchmark](https://img.shields.io/badge/LoCoMo--mini-66%25%20fewer%20tokens%20%40%200%25%20recall%20loss-3fb950)](#the-headline-reproduce-it-yourself)
 [![python](https://img.shields.io/badge/python-3.10%2B-58a6ff)](#install)
@@ -267,9 +267,12 @@ script isn't on your PATH.
 
 ```bash
 leptin serve   --db PATH        # run the MCP server on stdio
+leptin doctor  [--db PATH]      # health check: store, schema, models, hosted readiness
 leptin bench   [--budget N]     # reproducible token-savings benchmark
+leptin bench   --dataset locomo.json [--embedding-model text-embedding-3-small]
 leptin init    [--db PATH]      # create a store + print the MCP config block
 leptin report  [--window all]   # print the savings ledger
+leptin tune    [--dry-run|--rollback|--history]   # self-tuning
 leptin dashboard                # local savings dashboard
 leptin remember "..." [--subject S]
 leptin recall  "..." [--budget N]
@@ -279,13 +282,27 @@ leptin inspect [--query "..."]
 
 ---
 
+## Running it in production
+
+Leptin is built to run unattended as a long-lived MCP server, not just as a demo:
+
+- **`leptin doctor`** — one-command health check: Python/version, store path + schema version + memory counts + size, embedding/LLM model and whether the hosted SDK + API key are actually present, self-tuning and last-guardrail status. Exits non-zero if unhealthy (good for CI / startup probes).
+- **Schema migrations** — the on-disk schema is versioned (`PRAGMA user_version`); opening a store created by an older Leptin upgrades it in place. Your data survives upgrades.
+- **Concurrency** — WAL + a `busy_timeout` so the MCP server, the dashboard, and `leptin` CLI calls can share one DB file without "database is locked" errors.
+- **Scale** — parsed embeddings are cached, so recall over thousands of memories stays in the low-milliseconds. (For very large stores, a `sqlite-vec` fast path is on the roadmap; the interface won't change.)
+- **Structured logging** — set `LEPTIN_LOG=DEBUG|INFO|WARNING|ERROR` (default `WARNING`). Logs go to **stderr** only; stdout stays a clean MCP channel.
+- **Hardened hosted mode** — hosted embedding/LLM calls **retry transient errors with backoff** before degrading; embeddings are cached to avoid re-billing identical text; any downgrade emits a one-time warning. A real provider never silently degrades without telling you.
+- **Real-dataset benchmarking** — `leptin bench --dataset path/to/locomo.json --embedding-model text-embedding-3-small` runs the same harness on real [LoCoMo](https://snap-research.github.io/locomo/) data with hosted embeddings (the bundled synthetic corpus stays the offline, zero-key default).
+
+---
+
 ## Testing
 
 ```bash
 uv venv && uv pip install -e ".[dev]" && pytest
 ```
 
-99 tests cover the PRD acceptance criteria: budget guarantees (incl. `token_budget=0`), the savings-ledger math, dedup/merge/supersede, decay, the guardrail rollback/commit invariants, **self-tuning** (offline zero-cost, lock enforcement, improvement-on-degraded-store, reversibility, determinism), glass-box reversibility, the MCP protocol surface (including a real `leptin serve` subprocess driven over stdio), the dashboard HTTP layer, the hosted OpenAI/Voyage/Anthropic integration + degradation paths (mock-verified), env config coercion/clamping, and the reproducible benchmark. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
+112 tests cover the PRD acceptance criteria: budget guarantees (incl. `token_budget=0`), the savings-ledger math, dedup/merge/supersede, decay, the guardrail rollback/commit invariants, **self-tuning** (offline zero-cost, lock enforcement, improvement-on-degraded-store, reversibility, determinism), glass-box reversibility, the MCP protocol surface (including a real `leptin serve` subprocess driven over stdio), the dashboard HTTP layer, the hosted OpenAI/Voyage/Anthropic integration + **retry/degradation** paths (mock-verified), env config coercion/clamping, **schema migrations**, **concurrent writers**, **recall latency at scale**, the **LoCoMo loader**, `leptin doctor`, and the reproducible benchmark. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
 
 ---
 

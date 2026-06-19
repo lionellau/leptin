@@ -122,12 +122,45 @@ def _new_id() -> str:
     return uuid.uuid4().hex
 
 
+# --- schema migrations -------------------------------------------------------
+SCHEMA_VERSION = 2
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return column in {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    if not _has_column(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _migration_1(conn: sqlite3.Connection) -> None:
+    """Columns from the 0.1.x line (idempotent: no-ops on a fresh DB)."""
+    _add_column(conn, "memories", "superseded_by", "TEXT")
+    _add_column(conn, "memories", "reversible_until", "REAL")
+    _add_column(conn, "memories", "provenance", "TEXT")
+    _add_column(conn, "ledger", "detail", "TEXT")
+
+
+def _migration_2(conn: sqlite3.Connection) -> None:
+    """v1.0 self-tuning: the tables are created by SCHEMA (IF NOT EXISTS); this
+    establishes the version boundary so older DBs are recognised and upgraded."""
+    return None
+
+
+_MIGRATIONS = {1: _migration_1, 2: _migration_2}
+
+
 class Store:
     """Thin, explicit data-access layer over SQLite. No business logic here."""
 
     def __init__(self, path: str = ":memory:", clock: Optional[Callable[[], float]] = None):
         self.path = path
         self._clock = clock or time.time
+        # Parsed-embedding cache (id -> list[float]) so recall over a large store
+        # doesn't re-parse every memory's JSON vector on every call.
+        self._emb_cache: dict[str, list[float]] = {}
         # check_same_thread=False so the MCP server (single-threaded loop) and
         # the HTTP dashboard can share a connection safely under the GIL.
         self.conn = sqlite3.connect(path, check_same_thread=False)
@@ -137,7 +170,29 @@ class Store:
         self.conn.isolation_level = None
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        # Concurrency: wait up to 5s for a lock instead of erroring immediately,
+        # so multiple processes (e.g. MCP server + dashboard + CLI) coexist.
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    # --- schema versioning / migrations ------------------------------------
+    def _migrate(self) -> None:
+        """Bring an existing database up to the current schema.
+
+        The base ``SCHEMA`` (CREATE TABLE IF NOT EXISTS) guarantees every table
+        exists. Versioned migrations below handle column additions / transforms
+        on databases created by older Leptin versions, tracked via
+        ``PRAGMA user_version``. Each migration is idempotent.
+        """
+        current = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        for version, migrate in sorted(_MIGRATIONS.items()):
+            if current < version:
+                migrate(self.conn)
+                self.conn.execute(f"PRAGMA user_version={version}")
+        # A brand-new DB jumps straight to the latest version.
+        if current < SCHEMA_VERSION:
+            self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def now(self) -> float:
         return self._clock()
@@ -179,13 +234,32 @@ class Store:
                 now, now, 0, "active", source_session, provenance,
             ),
         )
+        self._emb_cache[mid] = list(embedding)  # seed the cache
         return self.get_memory(mid)  # type: ignore[return-value]
+
+    def _parse_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Row → dict, using the embedding cache to avoid re-parsing JSON vectors."""
+        d = dict(row)
+        mid = d["id"]
+        cached = self._emb_cache.get(mid)
+        if cached is not None:
+            d["embedding"] = cached
+        else:
+            emb: list[float] = []
+            if d.get("embedding"):
+                try:
+                    emb = json.loads(d["embedding"])
+                except (TypeError, json.JSONDecodeError):
+                    emb = []
+            d["embedding"] = emb
+            self._emb_cache[mid] = emb
+        return d
 
     def get_memory(self, memory_id: str) -> Optional[dict[str, Any]]:
         row = self.conn.execute(
             "SELECT * FROM memories WHERE id=?", (memory_id,)
         ).fetchone()
-        return _row_to_memory(row) if row else None
+        return self._parse_row(row) if row else None
 
     def update_memory(self, memory_id: str, **fields: Any) -> None:
         if not fields:
@@ -201,6 +275,8 @@ class Store:
         self.conn.execute(
             f"UPDATE memories SET {', '.join(cols)} WHERE id=?", vals
         )
+        if "embedding" in fields:
+            self._emb_cache.pop(memory_id, None)  # invalidate stale vector
 
     def list_memories(
         self, status: Optional[str] = "active", subject: Optional[str] = None
@@ -217,7 +293,7 @@ class Store:
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         q += " ORDER BY created_at"
-        return [_row_to_memory(r) for r in self.conn.execute(q, args).fetchall()]
+        return [self._parse_row(r) for r in self.conn.execute(q, args).fetchall()]
 
     def count_memories(self, status: Optional[str] = "active") -> int:
         if status is None:

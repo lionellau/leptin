@@ -1,0 +1,21 @@
+[
+  {
+    "conversation": {
+      "session_1": [
+        {"speaker": "Alice", "text": "I just adopted a golden retriever named Max."},
+        {"speaker": "Bob", "text": "That's great! How old is Max?"},
+        {"speaker": "Alice", "text": "Max is two years old and loves the park."}
+      ],
+      "session_2": [
+        {"speaker": "Alice", "text": "We moved to Seattle last month for my new job."},
+        {"speaker": "Bob", "text": "Nice, what's the new job?"},
+        {"speaker": "Alice", "text": "I'm a data engineer at a climate startup now."}
+      ]
+    },
+    "qa": [
+      {"question": "What is the name of Alice's dog?", "answer": "Max"},
+      {"question": "Where did Alice move to?", "answer": "Seattle"},
+      {"question": "What is Alice's job?", "answer": "data engineer"}
+    ]
+  }
+]

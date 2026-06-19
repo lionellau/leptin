@@ -113,6 +113,54 @@ def test_hosted_voyage_embedding(monkeypatch):
 
 
 # -------------------------------------------------- graceful degradation
+def test_hosted_embedder_retries_transient_then_succeeds():
+    """A transient embedding failure is retried, not permanently downgraded."""
+    from leptin.config import Config
+    from leptin.engine import DietEngine
+    from leptin.storage import Store
+
+    class _Flaky:
+        name = "flaky-hosted"
+        dim = 3
+        calls = 0
+
+        def embed(self, text):
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("transient 429")
+            return [0.1, 0.2, 0.3]
+
+    store = Store(":memory:")
+    eng = DietEngine(store, Config(embedding_model="text-embedding-3-small"),
+                     embedder=_Flaky())
+    eng._retry_backoff = 0.0  # no sleep in tests
+    vec = eng._embed("hello")
+    assert vec == [0.1, 0.2, 0.3]
+    assert eng._offline is False  # did NOT downgrade — retry recovered it
+    store.close()
+
+
+def test_hosted_embedder_downgrades_after_exhausting_retries():
+    from leptin.config import Config
+    from leptin.engine import DietEngine
+    from leptin.storage import Store
+
+    class _Dead:
+        name = "dead-hosted"
+        dim = 3
+
+        def embed(self, text):
+            raise ConnectionError("down")
+
+    store = Store(":memory:")
+    eng = DietEngine(store, Config(embedding_model="text-embedding-3-small"),
+                     embedder=_Dead())
+    eng._retry_backoff = 0.0
+    eng._embed("hello")  # retries then falls back
+    assert eng._offline is True
+    store.close()
+
+
 def test_hosted_merger_unavailable_degrades_on_near_duplicate(monkeypatch):
     """PRD 8.1(d): a hosted LLM merger that's unreachable must NOT crash
     remember() when a near-duplicate hits the merge path — it falls back to the
