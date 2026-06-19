@@ -16,7 +16,7 @@
 [![benchmark](https://img.shields.io/badge/LoCoMo--mini-66%25%20fewer%20tokens%20%40%200%25%20recall%20loss-3fb950)](#the-headline-reproduce-it-yourself)
 [![license](https://img.shields.io/badge/license-MIT-8b98a9)](LICENSE)
 
-[Quickstart](#quickstart) · [Why I built this](#why-i-built-this) · [How it works](#how-it-works) · [Benchmark](#the-headline-reproduce-it-yourself) · [Self-tuning](#-self-tuning--leptin-learns-its-own-diet) · [Security](#security)
+[Quickstart](#quickstart) · [Why I built this](#why-i-built-this) · [How it works](#how-it-works) · [Who it's for](#who-leptin-is-for) · [Benchmark](#the-headline-reproduce-it-yourself) · [Self-tuning](#-self-tuning--leptin-learns-its-own-diet) · [Security](#security)
 
 <img src="assets/demo.svg" alt="Leptin in action: install, recall under a token budget with receipts, and the headline benchmark" width="760"/>
 
@@ -35,6 +35,8 @@ Plenty of good tools address pieces of this. **Leptin's bet is to put the whole 
   Leptin puts your memory on a budget, shows you the receipts,
   and proves it didn't forget anything that mattered.
 ```
+
+**Best for** agents whose memory *grows over time* — long-running / spec-driven coding, long-horizon research, and autonomous or scheduled agents. Doing one-off Q&A or daily ops? You probably don't need it. ([who it's for, and who isn't ↓](#who-leptin-is-for))
 
 ---
 
@@ -207,21 +209,23 @@ leptin tune --rollback    # undo the last change, exactly
 
 ---
 
-## Is Leptin for you?
+## Who Leptin is for
 
-Other memory tools are good at what they do — this isn't a teardown. Leptin is a small, **local, auditable sidecar**, so it's a genuine fit for some setups and overkill for others. Being honest about which:
+The value scales with **how long your agent runs and how much it remembers.** Leptin earns its keep when memory *accumulates over time* and `recall` happens a lot:
 
-**Probably a fit if:**
-- you run a coding agent against a growing **local** memory store and want `recall` to stay lean and clean;
-- you want to *see* what your memory layer costs (tokens + $) on your own data;
-- you want decay / forgetting you can trust — checked and reversible — not a blind scanner.
+- **Spec-driven / long-running coding** — an agent working one codebase for weeks builds up hundreds of facts (architecture, conventions, "we tried X and dropped it"). Decisions change, so the store turns fat and contradictory. Leptin dedups it, supersedes stale decisions, and keeps every recall lean.
+- **Long-horizon research** (literature reviews, market/competitive analysis, ongoing investigations) — findings, sources, and claims pile up across sessions, full of restatements and updates. Leptin keeps the knowledge base clean and auditable, and caps what gets injected.
+- **Autonomous, looping, or scheduled agents** — agents that run for hours, loop, or run on a cron write and recall constantly; unbounded memory means runaway cost and degraded recall. A hard token budget + guardrailed pruning + self-tuning are aimed straight at this.
+- **A long-term personal assistant** — months of preferences, projects, people, and decisions, with stale facts piling up as things change. Decay + supersede + reversible forgetting keep it current without losing history.
+- **Cost- and ops-conscious small teams** running agents at volume — when many runs share one memory, the savings ledger (tokens + $) and the dashboard give you the numbers and a glass box.
 
-**Probably not, if:**
-- you want a fully managed, hosted, team memory platform with a UI — use one of those;
-- your store is small or you rarely call `recall` — the gains (and the point) are small;
-- you need deep *semantic* dedup with zero setup — that needs hosted embeddings (Leptin supports them; the zero-key default is lexical).
+**You probably don't need Leptin if:**
+- you mostly do one-off Q&A, chat, or daily operational prompts with no growing memory;
+- your work fits in a single session;
+- your store stays small or you rarely call `recall`;
+- you're happy on a fully managed, hosted memory platform with a team UI — use that.
 
-Leptin plays *alongside* your stack, not as a replacement for a memory platform.
+The throughline: if your agent's memory never grows past a handful of facts, you won't feel Leptin. If it grows for weeks and you recall from it constantly, that's exactly where it pays off.
 
 ---
 
