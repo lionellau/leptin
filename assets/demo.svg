@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 360" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+  <style>
+    .win{fill:#0d1117;stroke:#1e2636}
+    .bar{fill:#161b22}
+    .t{fill:#cdd9e5;font-size:15px}
+    .p{fill:#3fb950}        /* prompt $ */
+    .c{fill:#e6edf3}        /* command */
+    .m{fill:#8b98a9}        /* muted output */
+    .g{fill:#3fb950}        /* green output */
+    .y{fill:#f0883e}
+    g.frame{opacity:0}
+    g#f1{animation:f1 13s infinite}
+    g#f2{animation:f2 13s infinite}
+    g#f3{animation:f3 13s infinite}
+    @keyframes f1{0%{opacity:1}28%{opacity:1}33%{opacity:0}100%{opacity:0}}
+    @keyframes f2{0%{opacity:0}33%{opacity:0}38%{opacity:1}61%{opacity:1}66%{opacity:0}100%{opacity:0}}
+    @keyframes f3{0%{opacity:0}66%{opacity:0}71%{opacity:1}97%{opacity:1}100%{opacity:1}}
+  </style>
+
+  <rect class="win" x="8" y="8" width="744" height="344" rx="10"/>
+  <rect class="bar" x="8" y="8" width="744" height="34" rx="10"/>
+  <rect class="bar" x="8" y="28" width="744" height="14"/>
+  <circle cx="30" cy="25" r="6" fill="#f85149"/>
+  <circle cx="50" cy="25" r="6" fill="#f0883e"/>
+  <circle cx="70" cy="25" r="6" fill="#3fb950"/>
+  <text x="380" y="30" text-anchor="middle" class="m" font-size="13">leptin — the satiety hormone for agent memory</text>
+
+  <!-- Frame 1: install + connect -->
+  <g id="f1" class="frame">
+    <text x="28" y="80"  class="t"><tspan class="p">$ </tspan><tspan class="c">pip install leptin-mcp</tspan></text>
+    <text x="28" y="112" class="t"><tspan class="p">$ </tspan><tspan class="c">leptin init</tspan></text>
+    <text x="28" y="140" class="m">  ✓ store created at ~/.leptin/memory.db</text>
+    <text x="28" y="164" class="m">  ✓ MCP block ready — paste into Claude Code / Codex</text>
+    <text x="28" y="210" class="t"><tspan class="p">$ </tspan><tspan class="c">leptin remember "backend is FastAPI on Postgres" --subject stack</tspan></text>
+    <text x="28" y="234" class="m">  {"action": "created"}</text>
+  </g>
+
+  <!-- Frame 2: recall under budget (savings) -->
+  <g id="f2" class="frame">
+    <text x="28" y="80"  class="t"><tspan class="p">$ </tspan><tspan class="c">leptin recall "what's the backend?" --budget 300</tspan></text>
+    <text x="28" y="112" class="m">  - The backend is FastAPI on Postgres.</text>
+    <text x="28" y="150" class="t">  tokens_used <tspan class="c">12</tspan>   ·   naive baseline <tspan class="c">96</tspan>   ·   <tspan class="g">saved 84  💸</tspan></text>
+    <text x="28" y="200" class="t"><tspan class="p">$ </tspan><tspan class="c">leptin report</tspan></text>
+    <text x="28" y="226" class="m">  tokens_saved: <tspan class="g">84</tspan>   usd_saved: <tspan class="g">$0.00025</tspan>   active: 1</text>
+  </g>
+
+  <!-- Frame 3: the headline -->
+  <g id="f3" class="frame">
+    <text x="28" y="80"  class="t"><tspan class="p">$ </tspan><tspan class="c">leptin bench</tspan></text>
+    <text x="28" y="118" class="t">  TOKEN REDUCTION   <tspan class="g">66.2%</tspan>   <tspan class="m">(target ≥ 60%)</tspan></text>
+    <text x="28" y="146" class="t">  RECALL LOSS        <tspan class="g">0.0%</tspan>   <tspan class="m">(target ≤ 2%)</tspan></text>
+    <text x="28" y="174" class="t">  est. $ saved       <tspan class="g">$0.006966</tspan></text>
+    <text x="28" y="212" class="t">  HEADLINE          <tspan class="g">PASS ✅  ≥60% fewer tokens at ≤2% recall loss</tspan></text>
+    <text x="28" y="252" class="m">  offline · deterministic · zero LLM calls</text>
+  </g>
+</svg>

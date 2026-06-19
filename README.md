@@ -18,6 +18,8 @@
 
 [Quickstart](#quickstart) · [Why I built this](#why-i-built-this) · [How it works](#how-it-works) · [Benchmark](#the-headline-reproduce-it-yourself) · [Self-tuning](#-self-tuning--leptin-learns-its-own-diet) · [Security](#security)
 
+<img src="assets/demo.svg" alt="Leptin in action: install, recall under a token budget with receipts, and the headline benchmark" width="760"/>
+
 </div>
 
 ---
