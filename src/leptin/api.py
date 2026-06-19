@@ -40,7 +40,29 @@ class Leptin:
             else:
                 config = Config.from_env()
         self.config = config
+
+        # Persist a session id so separate CLI invocations within a short window
+        # (`leptin remember …` then `leptin report --window session`) share one
+        # session. The MCP server holds one process, so it gets a stable id too.
+        if session_id is None and path != ":memory:":
+            session_id = self._resume_or_new_session()
         self.engine = DietEngine(self.store, config, session_id=session_id)
+
+    _SESSION_WINDOW_S = 1800.0  # 30 min of inactivity ends a CLI "session"
+
+    def _resume_or_new_session(self) -> str:
+        import uuid
+
+        state = self.store.load_config()
+        now = self.store.now()
+        last_id = state.get("_session_id")
+        last_ts = state.get("_session_ts")
+        if last_id and isinstance(last_ts, (int, float)) and (now - last_ts) < self._SESSION_WINDOW_S:
+            sid = str(last_id)
+        else:
+            sid = uuid.uuid4().hex
+        self.store.save_config({"_session_id": sid, "_session_ts": now})
+        return sid
 
     # --- persistence of config ---
     def save_config(self) -> None:
@@ -71,6 +93,22 @@ class Leptin:
 
     def diet_report(self, window: str = "session") -> dict[str, Any]:
         return self.engine.diet_report(window=window)
+
+    # --- self-tuning (v0.2) ---
+    def tune(self, dry_run: bool = False) -> dict[str, Any]:
+        result = self.engine.tuner.tune(dry_run=dry_run, trigger="manual")
+        if result.get("accepted") and not dry_run:
+            self.config = self.engine.config  # adopt the tuned config
+        return result
+
+    def tune_rollback(self, version: Optional[int] = None) -> dict[str, Any]:
+        result = self.engine.tuner.rollback(version=version)
+        if result.get("rolled_back"):
+            self.config = self.engine.config
+        return result
+
+    def tune_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self.engine.tuner.history(limit)
 
     # --- guardrail probe management ---
     def add_probe(self, question: str, expected_fact: str) -> str:

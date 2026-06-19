@@ -121,15 +121,41 @@ class Guardrail:
         for p in probes:
             injected = self.engine._recall_preview(p["question"], now)
             inj_ids = {m["id"] for m in injected}
-            src = p.get("source_memory_id")
+            src = p.get("source_memory_id") or self._resolve_source(p, now)
             if src:
                 live = self.engine._live_id(src)
                 covered = live is not None and live in inj_ids
             else:
-                covered = any(covers(m["content"], p["expected_fact"]) for m in injected)
+                covered = self._covered_unlinked(p, injected, now)
             if covered:
                 hits += 1
         return hits / len(probes)
+
+    def _resolve_source(self, p: dict[str, Any], now: float) -> Optional[str]:
+        """Lazily link an unlinked probe to a live memory it's actually about —
+        a memory that both ranks for the question and contains the expected fact.
+        Closes the case where the probed memory was added after the probe."""
+        cfg = self.engine.config
+        for r in self.engine._rank(p["question"], now):
+            if r["sim"] >= cfg.contradiction_threshold and covers(r["memory"]["content"], p["expected_fact"]):
+                return r["memory"]["id"]
+        return None
+
+    def _covered_unlinked(self, p: dict[str, Any], injected: list[dict[str, Any]], now: float) -> bool:
+        """Fallback coverage for a probe with no identity anchor. Strict: a memory
+        only counts if it contains the expected fact AND is genuinely on-topic for
+        both the question and the expected fact — so a survivor that merely shares
+        a token with a short fact can't fake coverage."""
+        cfg = self.engine.config
+        q, exp = p["question"], p["expected_fact"]
+        q_emb = self.engine._embed(q)
+        exp_emb = self.engine._embed(exp)
+        for m in injected:
+            if (covers(m["content"], exp)
+                    and self.engine._similarity(q, q_emb, m) >= cfg.contradiction_threshold
+                    and self.engine._similarity(exp, exp_emb, m) >= cfg.contradiction_threshold):
+                return True
+        return False
 
     # ------------------------------------------------------- guarded compact
     def guarded_compact(self, dry_run: bool = False) -> dict[str, Any]:
@@ -138,6 +164,11 @@ class Guardrail:
         cfg = engine.config
         now = store.now()
 
+        # Pin the embedder before measuring so recall_before and recall_after are
+        # computed with the SAME embedder (a hosted→local fallback mid-compaction
+        # would otherwise make them non-comparable).
+        engine._settle_embedder()
+
         # Expire anything past its retention window first (purely additive, not
         # part of the guarded prune — these are already inactive).
         purged = 0 if dry_run else engine.purge_expired(now)
@@ -145,10 +176,37 @@ class Guardrail:
         probes = self.build_probe_set(now)
         recall_before = self.measure(probes, now)
         plan = engine.plan_compaction(now)
-        projected_freed = sum(m["tokens"] for m in plan["decayed"])
+        n_decay = len(plan["decayed"])
+        n_merge = len(plan.get("merges", []))
+        n_super = len(plan.get("supersedes", []))
+        projected_freed = (
+            sum(m["tokens"] for m in plan["decayed"])
+            + sum(d["tokens"] for _k, d in plan.get("merges", []))
+            + sum(o["tokens"] for _n, o in plan.get("supersedes", []))
+        )
 
-        if not plan["decayed"]:
-            store.add_probe_run("compact", recall_before, recall_before, True, False)
+        def log_compact(recall_after, passed, rolled_back, applied):
+            # Every (non-dry-run) compact writes one ledger row — including no-op
+            # and rolled-back runs — with the guardrail result in its detail.
+            committed = passed and not rolled_back and not dry_run
+            if not dry_run:
+                engine._log_footprint(
+                    "compact",
+                    reduced=projected_freed if committed else 0,
+                    detail={"decayed": applied.get("decayed_count", 0),
+                            "merged": applied.get("merged_count", 0),
+                            "superseded": applied.get("superseded_count", 0),
+                            "recall_before": round(recall_before, 4),
+                            "recall_after": round(recall_after, 4),
+                            "passed": passed, "rolled_back": rolled_back,
+                            "purged": purged},
+                )
+            store.add_probe_run("compact", recall_before, recall_after, passed, rolled_back)
+
+        # Nothing to consolidate.
+        if not (n_decay or n_merge or n_super):
+            log_compact(recall_before, True, False,
+                        {"decayed_count": 0, "merged_count": 0, "superseded_count": 0})
             return self._report(
                 merged=0, superseded=0, decayed=0, projected=0,
                 recall_before=recall_before, recall_after=recall_before,
@@ -158,6 +216,7 @@ class Guardrail:
         store.begin()
         committed = False
         recall_after = recall_before
+        applied = {"decayed": [], "merged": [], "superseded": []}
         try:
             applied = engine.apply_compaction(plan, now)
             recall_after = self.measure(probes, now)  # sees pending changes
@@ -169,24 +228,26 @@ class Guardrail:
                 committed = True
         except Exception:
             store.rollback()
-            # Preserve the trust audit trail even on an aborted compaction.
-            store.add_probe_run("compact", recall_before, recall_after, False, True)
+            log_compact(recall_after, False, True,
+                        {"decayed_count": n_decay, "merged_count": n_merge,
+                         "superseded_count": n_super})
             raise
 
         rolled_back = (not committed) and (not dry_run)
-        store.add_probe_run("compact", recall_before, recall_after, passed,
-                            rolled_back)
+        log_compact(recall_after, passed, rolled_back,
+                    {"decayed_count": n_decay, "merged_count": n_merge,
+                     "superseded_count": n_super})
 
         tokens_saved = projected_freed if committed else 0
-        if committed:
-            engine._log_footprint("compact", reduced=projected_freed,
-                                  detail={"decayed": len(applied["decayed"])})
-
-        diff = [{"memory_id": mid, "action": "decayed"} for mid in plan_ids(plan)]
+        diff = (
+            [{"memory_id": m["id"], "action": "decayed"} for m in plan["decayed"]]
+            + [{"memory_id": d["id"], "action": "merged"} for _k, d in plan.get("merges", [])]
+            + [{"memory_id": o["id"], "action": "superseded"} for _n, o in plan.get("supersedes", [])]
+        )
+        # Report the *attempted* counts; `rolled_back` / `tokens_saved` convey
+        # whether they were actually committed.
         return self._report(
-            merged=len(applied["merged"]) if committed else 0,
-            superseded=len(applied["superseded"]) if committed else 0,
-            decayed=len(plan["decayed"]),
+            merged=n_merge, superseded=n_super, decayed=n_decay,
             projected=projected_freed,
             recall_before=recall_before, recall_after=recall_after,
             passed=passed, rolled_back=rolled_back, dry_run=dry_run, diff=diff,

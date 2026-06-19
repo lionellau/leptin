@@ -86,6 +86,12 @@ def make_handler(mem: Leptin):
                 rows = [dict(r) for r in mem.store.conn.execute(
                     "SELECT * FROM probe_runs ORDER BY id DESC LIMIT 50").fetchall()]
                 return self._json({"compactions": rows})
+            if path == "/api/inspect":
+                return self._json(mem.inspect(memory_id=qs.get("memory_id", [None])[0],
+                                              query=qs.get("query", [None])[0]))
+            if path == "/api/tuning":
+                report = mem.diet_report("all").get("tuning")
+                return self._json({"tuning": report, "history": mem.tune_history(50)})
             return self._json({"error": "not found"}, 404)
 
         def _body(self):
@@ -120,6 +126,11 @@ def make_handler(mem: Leptin):
                 return self._json(mem.forget(memory_id=mid, query=q))
             if path == "/api/compact":
                 return self._json(mem.compact(dry_run=bool(data.get("dry_run", False))))
+            if path == "/api/tune":
+                return self._json(mem.tune(dry_run=bool(data.get("dry_run", False))))
+            if path == "/api/rollback":
+                v = data.get("version")
+                return self._json(mem.tune_rollback(version=int(v) if v is not None else None))
             return self._json({"error": "not found"}, 404)
 
     return Handler
@@ -217,6 +228,17 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <div class="panel">
+    <h2>🧬 Self-tuning (evolution ledger)</h2>
+    <div class="controls">
+      <button onclick="tune(true)">Preview self-tune</button>
+      <button onclick="tune(false)">Self-tune now</button>
+      <button onclick="rollback()">Roll back last</button>
+      <span id="tuneMsg" class="muted"></span>
+    </div>
+    <div id="tuning"></div>
+  </div>
+
+  <div class="panel">
     <h2>Memory browser (glass box)</h2>
     <div class="controls">
       <input id="search" placeholder="filter by text or subject…" oninput="render()"/>
@@ -251,6 +273,28 @@ async function load(){
   MEM=(await getJSON('/api/memories?status=all')).memories;
   render();
   loadCompactions();
+  loadTuning();
+}
+
+async function loadTuning(){
+  const data=await getJSON('/api/tuning');
+  const el=document.getElementById('tuning');
+  const t=data.tuning;
+  const hist=data.history||[];
+  let head='<div class="empty">Self-tuning is off (set self_tune_enabled) or has not run yet.</div>';
+  if(t){
+    head=`<div class="muted">enabled: <b>${t.enabled}</b> · cycles: ${t.cycles} · accepted: ${t.accepted} · rejected: ${t.rejected} · LLM calls: ${t.llm_calls} (cost-free offline) · current version: ${t.current_version||'—'}</div>`;
+  }
+  let table='';
+  const tuned=hist.filter(h=>h.direction==='tuned'||h.direction==='rollback');
+  if(tuned.length){
+    table='<table><thead><tr><th>#</th><th>knob(s)</th><th>change</th><th>direction</th><th>reason</th></tr></thead><tbody>'+
+      tuned.map(h=>`<tr><td class="muted">${h.id}</td><td>${esc(h.knob||'—')}</td>
+        <td class="muted">${esc(JSON.stringify(h.new_value||{}))}</td>
+        <td><span class="pill ${h.direction==='rollback'?'superseded':'active'}">${h.direction}</span></td>
+        <td class="muted">${esc(h.reason||'')}</td></tr>`).join('')+'</tbody></table>';
+  }
+  el.innerHTML=head+table;
 }
 
 function drawChart(){
@@ -312,6 +356,20 @@ async function compact(dry){
   document.getElementById('compactMsg').textContent=
     `${dry?'preview':'ran'}: decayed ${r.decayed}, recall ${(g.recall_before*100||0).toFixed(0)}%→${(g.recall_after*100||0).toFixed(0)}%, `+
     (g.rolled_back?'ROLLED BACK (recall would drop)':(r.dry_run?'would commit':'committed'));
+  await load();
+}
+
+async function tune(dry){
+  const r=await postJSON('/api/tune',{dry_run:dry});
+  const ch=(r.changes||[]).map(c=>`${c.knob} ${(+c.old).toFixed(2)}→${(+c.new).toFixed(2)}`).join(', ')||'no change';
+  document.getElementById('tuneMsg').textContent=
+    `${dry?'preview':'ran'}: ${r.accepted?'ACCEPTED':'no net win'} — ${ch}`+
+    (r.objective_after!=null?` (objective ${(r.objective_before).toFixed(3)}→${(r.objective_after).toFixed(3)}, ${r.llm_calls} LLM calls)`:'');
+  await load();
+}
+async function rollback(){
+  const r=await postJSON('/api/rollback',{});
+  document.getElementById('tuneMsg').textContent=r.rolled_back?`rolled back to version ${r.version}`:`nothing to roll back (${r.reason||''})`;
   await load();
 }
 load();

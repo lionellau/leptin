@@ -38,6 +38,23 @@ def test_env_dict_parsed_as_json(monkeypatch):
     assert c.price_table["x"]["input"] == 1.0
 
 
+def test_config_clamps_nonsensical_values():
+    """#29 — bad values are clamped to sane ranges instead of crashing later."""
+    c = Config(token_budget_default=-5, strength_floor=2.0, recall_rel_floor=9.0,
+               guardrail_max_drop=-1.0, decay_half_life_days=-3.0, recall_k=0)
+    assert c.token_budget_default >= 1
+    assert 0.0 <= c.strength_floor <= 1.0
+    assert 0.0 <= c.recall_rel_floor <= 1.0
+    assert 0.0 <= c.guardrail_max_drop <= 1.0
+    assert c.decay_half_life_days >= 0.0
+    assert c.recall_k >= 1
+
+
+def test_config_allows_dedup_disable_value():
+    """The benchmark uses dedup_threshold=2.0 to disable merging — must survive."""
+    assert Config(dedup_threshold=2.0).dedup_threshold == 2.0
+
+
 def test_usd_for_tokens_uses_price_model():
     c = Config(price_model="gpt-4o-mini")
     # gpt-4o-mini input price is 0.15 / 1M tokens.

@@ -36,8 +36,8 @@ def test_initialize_and_tool_list():
 
     names = [t["name"] for t in _by_id(resp, 2)["result"]["tools"]]
     assert set(names) == {"remember", "recall", "compact", "forget", "restore",
-                          "inspect", "diet_report"}
-    assert len(TOOLS) == 7
+                          "inspect", "diet_report", "self_tune"}
+    assert len(TOOLS) == 8
 
 
 def test_all_seven_tools_callable():

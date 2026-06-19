@@ -100,6 +100,80 @@ class Config:
     embedding_dim: int = 256
     """Dimensionality of the local hashing embedder."""
 
+    # --- Self-tuning (v0.2; see PRD §13). Offline-safe; opt-in. ---
+    self_tune_enabled: bool = False
+    """Run a self-tuning cycle automatically at the tail of compact()."""
+
+    tune_objective: str = "balanced"
+    """``balanced`` (0.5), ``savings`` (0.8), or ``recall`` (0.2) weight on savings."""
+
+    tune_min_new_memories: int = 20
+    """Auto-tune trigger: memories created since the last tune."""
+
+    tune_max_interval_days: float = 7.0
+    """Cadence sentinel: tune at least this often (catches drift with no writes)."""
+
+    tune_recall_floor: float = 0.85
+    """Auto-tune trigger: probe hit-rate below this forces a cycle."""
+
+    tune_epsilon: float = 0.005
+    """Minimum objective gain to accept a tuned config."""
+
+    tune_replay_n: int = 200
+    """Cap on recent recall queries replayed during an eval (bounds cost)."""
+
+    tune_max_coords_per_cycle: int = 2
+    """Knobs adjusted per tune cycle (bounds cost)."""
+
+    tune_freeze_days: float = 14.0
+    """Meta-guardrail: disable self-tuning this long after repeated failures."""
+
+    tune_savings_floor: float = 0.0
+    """Max tolerated drop in token-reduction before a tuned config is rejected."""
+
+    def __post_init__(self) -> None:
+        """Clamp tunables to sane ranges so a bad value can't crash or mislead.
+
+        Cosine thresholds may exceed 1.0 to mean "never" (e.g. dedup_threshold=2
+        disables merging — the benchmark relies on this), so those get a wider
+        ceiling; fractions are clamped to [0, 1]; counts/durations to positive.
+        """
+        def clamp(v, lo, hi):
+            try:
+                return max(lo, min(hi, v))
+            except TypeError:
+                return v
+
+        # Fractions in [0, 1]
+        self.strength_floor = clamp(self.strength_floor, 0.0, 1.0)
+        self.access_boost = clamp(self.access_boost, 0.0, 1.0)
+        self.guardrail_max_drop = clamp(self.guardrail_max_drop, 0.0, 1.0)
+        self.recall_rel_floor = clamp(self.recall_rel_floor, 0.0, 1.0)
+        self.recall_min_sim = clamp(self.recall_min_sim, 0.0, 1.0)
+        # Cosine thresholds: allow up to 2.0 to mean "disable".
+        self.dedup_threshold = clamp(self.dedup_threshold, 0.0, 2.0)
+        self.contradiction_threshold = clamp(self.contradiction_threshold, 0.0, 2.0)
+        # Positive counts / sizes
+        self.token_budget_default = max(1, int(self.token_budget_default))
+        self.recall_k = max(1, int(self.recall_k))
+        self.naive_top_k = max(1, int(self.naive_top_k))
+        self.max_probes = max(1, int(self.max_probes))
+        self.embedding_dim = max(1, int(self.embedding_dim))
+        # Non-negative durations
+        self.decay_half_life_days = max(0.0, float(self.decay_half_life_days))
+        self.reversible_window_days = max(0.0, float(self.reversible_window_days))
+        # Self-tuning knobs
+        self.tune_recall_floor = clamp(self.tune_recall_floor, 0.0, 1.0)
+        self.tune_epsilon = clamp(self.tune_epsilon, 0.0, 1.0)
+        self.tune_savings_floor = clamp(self.tune_savings_floor, 0.0, 1.0)
+        self.tune_min_new_memories = max(1, int(self.tune_min_new_memories))
+        self.tune_replay_n = max(1, int(self.tune_replay_n))
+        self.tune_max_coords_per_cycle = max(1, int(self.tune_max_coords_per_cycle))
+        self.tune_max_interval_days = max(0.0, float(self.tune_max_interval_days))
+        self.tune_freeze_days = max(0.0, float(self.tune_freeze_days))
+        if self.tune_objective not in ("balanced", "savings", "recall"):
+            self.tune_objective = "balanced"
+
     def input_price_per_token(self) -> float:
         entry = self.price_table.get(self.price_model) or self.price_table.get(
             "default", {"input": 3.0}

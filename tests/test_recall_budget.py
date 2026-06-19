@@ -41,6 +41,20 @@ def test_dropped_count_reported(mem):
     assert res["dropped_count"] == res.get("dropped_count")
 
 
+def test_zero_budget_injects_nothing(mem):
+    """Regression: token_budget=0 is an explicit ceiling, not 'unset' (falsy bug)."""
+    _seed(mem, 20)
+    res = mem.recall("topic 2 filler", token_budget=0)
+    assert res["tokens_used"] == 0
+    assert res["memories"] == []
+
+
+def test_zero_k_injects_nothing(mem):
+    _seed(mem, 20)
+    res = mem.recall("topic 1 filler", k=0)
+    assert res["memories"] == []
+
+
 def test_empty_store_recall_is_safe(mem):
     res = mem.recall("anything")
     assert res["memories"] == []

@@ -117,6 +117,19 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "self_tune",
+        "description": (
+            "Self-tune the memory policy: replay this store's data under candidate "
+            "configs and commit a change only if held-out evals prove a net win "
+            "(more savings, no recall loss) — else leave it unchanged. Offline, "
+            "zero LLM calls. Use dry_run to preview the proposed change."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"dry_run": {"type": "boolean", "description": "Preview only."}},
+        },
+    },
 ]
 
 
@@ -134,6 +147,7 @@ class MCPServer:
             "restore": lambda a: mem.restore(a.get("memory_id", "")),
             "inspect": lambda a: mem.inspect(a.get("memory_id"), a.get("query")),
             "diet_report": lambda a: mem.diet_report(a.get("window", "session")),
+            "self_tune": lambda a: mem.tune(bool(a.get("dry_run", False))),
         }
 
     # --- io ---

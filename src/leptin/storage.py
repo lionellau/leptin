@@ -80,6 +80,35 @@ CREATE TABLE IF NOT EXISTS config (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Self-tuning (v0.2): the evolution ledger.
+CREATE TABLE IF NOT EXISTS config_versions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    knob        TEXT,
+    old_value   TEXT,
+    new_value   TEXT,
+    direction   TEXT,            -- up | down | rollback
+    accepted    INTEGER,
+    reason      TEXT,
+    parent_id   INTEGER,
+    config_json TEXT             -- full Config snapshot for exact restore
+);
+
+CREATE TABLE IF NOT EXISTS tune_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               REAL NOT NULL,
+    trigger          TEXT,
+    cycle            INTEGER,
+    recall_before    REAL,
+    recall_after     REAL,
+    reduction_before REAL,
+    reduction_after  REAL,
+    accepted         INTEGER,
+    rolled_back      INTEGER,
+    llm_calls        INTEGER NOT NULL DEFAULT 0,
+    tune_tokens      INTEGER NOT NULL DEFAULT 0
+);
 """
 
 MEMORY_COLUMNS = [
@@ -290,6 +319,59 @@ class Store:
             (self.now(), trigger, recall_before, recall_after, int(passed), int(rolled_back)),
         )
 
+    # --- self-tuning: evolution ledger ---
+    def add_config_version(
+        self, knob: Optional[str], old_value: Any, new_value: Any, direction: str,
+        accepted: bool, reason: str, config_json: dict[str, Any],
+        parent_id: Optional[int] = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO config_versions
+               (ts, knob, old_value, new_value, direction, accepted, reason, parent_id, config_json)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (self.now(), knob, json.dumps(old_value), json.dumps(new_value), direction,
+             int(accepted), reason, parent_id, json.dumps(config_json)),
+        )
+        return int(cur.lastrowid)
+
+    def latest_config_version(self, accepted_only: bool = True) -> Optional[dict[str, Any]]:
+        q = "SELECT * FROM config_versions"
+        if accepted_only:
+            q += " WHERE accepted=1"
+        q += " ORDER BY id DESC LIMIT 1"
+        row = self.conn.execute(q).fetchone()
+        return _decode_version(row) if row else None
+
+    def get_config_version(self, version_id: int) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            "SELECT * FROM config_versions WHERE id=?", (version_id,)
+        ).fetchone()
+        return _decode_version(row) if row else None
+
+    def list_config_versions(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM config_versions ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [_decode_version(r) for r in rows]
+
+    def add_tune_run(self, **fields: Any) -> None:
+        cols = ["trigger", "cycle", "recall_before", "recall_after",
+                "reduction_before", "reduction_after", "accepted", "rolled_back",
+                "llm_calls", "tune_tokens"]
+        vals = [self.now()] + [fields.get(c) for c in cols]
+        # Coerce booleans.
+        self.conn.execute(
+            f"INSERT INTO tune_runs (ts, {', '.join(cols)}) VALUES ({','.join(['?'] * (len(cols) + 1))})",
+            tuple(int(v) if isinstance(v, bool) else v for v in vals),
+        )
+
+    def list_tune_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM tune_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
+
+    def count_tune_runs(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM tune_runs").fetchone()[0]
+
     # --- config ---
     def save_config(self, data: dict[str, Any]) -> None:
         for k, v in data.items():
@@ -318,4 +400,15 @@ def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:
             d["embedding"] = []
     else:
         d["embedding"] = []
+    return d
+
+
+def _decode_version(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    for k in ("old_value", "new_value", "config_json"):
+        if d.get(k):
+            try:
+                d[k] = json.loads(d[k])
+            except (TypeError, json.JSONDecodeError):
+                pass
     return d

@@ -1,6 +1,6 @@
 [project]
 name = "leptin-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "The satiety hormone for agent memory — a drop-in MCP memory server that puts your agent's long-term memory on a token budget, shows the receipts, and guarantees it never silently forgot anything."
 readme = "README.md"
 license = { text = "MIT" }
@@ -20,7 +20,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-hosted = ["openai>=1.0", "anthropic>=0.40", "tiktoken>=0.7"]
+hosted = ["openai>=1.0", "anthropic>=0.40", "voyageai>=0.2", "tiktoken>=0.7"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

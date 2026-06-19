@@ -6,7 +6,8 @@
 
 **A drop-in MCP memory server that puts your agent's long-term memory on a token budget, shows you the receipts, and guarantees it never silently forgot anything that mattered.**
 
-[![tests](https://img.shields.io/badge/tests-74%20passing-3fb950)](#testing)
+[![tests](https://img.shields.io/badge/tests-99%20passing-3fb950)](#testing)
+[![self-tuning](https://img.shields.io/badge/self--tuning-closed--loop-3fb950)](#-self-tuning-leptin-learns-its-own-diet)
 [![benchmark](https://img.shields.io/badge/LoCoMo--mini-66%25%20fewer%20tokens%20%40%200%25%20recall%20loss-3fb950)](#the-headline-reproduce-it-yourself)
 [![python](https://img.shields.io/badge/python-3.10%2B-58a6ff)](#install)
 [![deps](https://img.shields.io/badge/core%20deps-zero-58a6ff)](#design)
@@ -47,7 +48,7 @@ leptin bench
   TOKEN REDUCTION   : 66.2%   (target ≥ 60%)
   recall            : naive 1.000   leptin 1.000
   RECALL LOSS       : 0.0%   (target ≤ 2%)
-  est. $ saved      : $0.007272  (priced at claude-sonnet-4-6)
+  est. $ saved      : $0.006966  (priced at claude-sonnet-4-6)
   recall latency    : 2.18 ms/query (leptin)
   ----------------------------------------------------------------
   HEADLINE          : PASS ✅  ≥60% fewer memory tokens at ≤2% recall loss
@@ -106,7 +107,9 @@ That prints a ready-to-paste MCP config block:
 }
 ```
 
-Restart the client. The agent now has 7 memory tools. Ask it to *"remember that I prefer dark mode"*, then later *"what are my preferences?"* — and run `leptin report` to see the tokens and dollars saved.
+Restart the client. The agent now has 8 memory tools. Ask it to *"remember that I prefer dark mode"*, then later *"what are my preferences?"* — and run `leptin report` to see the tokens and dollars saved.
+
+> Savings show up once your store has some overlap (so dedup/merge fires) or recall hits the token budget. On a brand-new store with one fact, `report` will honestly say it hasn't saved anything *yet* — keep using it and the receipts add up.
 
 ### 3. See the receipts
 
@@ -130,17 +133,18 @@ The "compress/forget memory" idea is partially solved. The unowned gap is the **
 
 ---
 
-## The 7 MCP tools
+## The 8 MCP tools
 
 | Tool | What it does |
 |---|---|
 | `remember` | Store a fact. Write-time **dedup/merge**; contradictions **supersede** the older fact (kept, not deleted). |
 | `recall` | Retrieve under a **token budget** — packed for relevance, with `tokens_saved` vs. a naive top-k dump. |
-| `compact` | **Guardrailed** decay-prune + merge. Auto-rolls-back any prune that hurts recall. `dry_run` to preview. |
+| `compact` | **Guardrailed** decay-prune + merge + supersede. Auto-rolls-back any prune that hurts recall. `dry_run` to preview. |
 | `forget` | Soft-delete by id or query → **quarantine** (reversible), never a hard delete. |
 | `restore` | Bring a forgotten/quarantined memory back. Glass-box reversibility. |
 | `inspect` | Full provenance, current strength, and event history for any memory. |
 | `diet_report` | The "show me the receipts" tool: tokens & $ saved, op breakdown, guardrail status, top savers. |
+| `self_tune` | **Self-evolve the memory policy** on your data — commit only on a proven net win, else revert. Offline, zero LLM calls. |
 
 ---
 
@@ -172,6 +176,43 @@ mem.compact()
 
 ---
 
+## 🧬 Self-tuning — Leptin learns its own diet
+
+Leptin doesn't just *measure* itself — it **evolves**. The self-tuning loop replays your own data under candidate policies and commits a change only when held-out evals prove it's a net win (more savings, no recall loss), else it leaves the config alone. Same trust DNA as the guardrail, applied to the policy itself.
+
+```bash
+leptin tune --dry-run     # preview the proposed change
+leptin tune               # apply it (only if it's a proven net win)
+leptin tune --history     # the evolution ledger
+leptin tune --rollback    # undo the last change (exactly)
+```
+
+```jsonc
+// leptin tune  →
+{ "accepted": true,
+  "changes": [{ "knob": "recall_rel_floor", "old": 0.40, "new": 0.42, "direction": "up" }],
+  "objective_before": 0.682, "objective_after": 0.718,
+  "recall_before": 1.0, "recall_after": 1.0,
+  "llm_calls": 0, "tune_tokens": 0 }     // ← offline: costs nothing
+```
+
+**How it stays safe and cheap:**
+
+- **Held-out gate + dual-metric accept.** Probes are split (4/5 visible to the optimizer, 1/5 held out); a change commits only if it improves the objective AND holds recall on the held-out set. No overfitting the eval, no recall regressions.
+- **Locked knobs.** The optimizer (a UCB coordinate-ascent hill-climb) can only touch a clamped set of recall/decay knobs. It can **never** touch `guardrail_max_drop` or other safety rails.
+- **Reversible.** Every accepted change is a row in an evolution ledger; `leptin tune --rollback` restores the exact prior config. A meta-guardrail freezes the *automatic* loop after repeated failures.
+- **Token/context efficient by construction.** Read-only candidate evals on a bounded query sample, **zero LLM calls offline**, cadence-triggered (not per-op), tiny scorecard output. Auto-tuning is opt-in (`self_tune_enabled`); manual `leptin tune` always works.
+
+Turn on the autopilot:
+
+```bash
+LEPTIN_SELF_TUNE_ENABLED=true leptin serve --db ~/.leptin/memory.db
+```
+
+`diet_report` (and the dashboard) grow a `tuning` block so the self-evolution is a glass box too: cycles, accepted/rejected, current version, and `llm_calls` (0 offline).
+
+---
+
 ## Design
 
 - **Zero core dependencies.** The engine, MCP server, ledger, guardrail, dashboard, and benchmark run on the Python standard library alone. No native vector extension to fight with, no model download. `pip install` is instant; `uvx leptin-mcp` just works.
@@ -198,6 +239,8 @@ Every tunable has a sane default. Override via env vars (`LEPTIN_*`), the `confi
 | `embedding_model` | `local-hash` | or `text-embedding-3-small`, `voyage-3`, … |
 | `llm_model` | `heuristic` | or `claude-haiku-4-5`, `gpt-4o-mini`, … |
 | `price_model` | `claude-sonnet-4-6` | Which prices to value savings against |
+| `self_tune_enabled` | `false` | Run the self-tuning loop automatically after compaction |
+| `tune_objective` | `balanced` | `balanced` / `savings` / `recall` weighting |
 
 ---
 
@@ -240,15 +283,16 @@ leptin inspect [--query "..."]
 uv venv && uv pip install -e ".[dev]" && pytest
 ```
 
-74 tests cover the PRD acceptance criteria: budget guarantees, the savings-ledger math, dedup/merge/supersede, decay, the guardrail rollback/commit invariants, glass-box reversibility, the MCP protocol surface (including a real `leptin serve` subprocess driven over stdio), the hosted OpenAI/Voyage/Anthropic integration paths (mock-verified), env config coercion, and the reproducible benchmark. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
+99 tests cover the PRD acceptance criteria: budget guarantees (incl. `token_budget=0`), the savings-ledger math, dedup/merge/supersede, decay, the guardrail rollback/commit invariants, **self-tuning** (offline zero-cost, lock enforcement, improvement-on-degraded-store, reversibility, determinism), glass-box reversibility, the MCP protocol surface (including a real `leptin serve` subprocess driven over stdio), the dashboard HTTP layer, the hosted OpenAI/Voyage/Anthropic integration + degradation paths (mock-verified), env config coercion/clamping, and the reproducible benchmark. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
 
 ---
 
 ## Roadmap
 
-- **v1 (now):** MCP server + 7 tools · SQLite backend · dedup/merge · decay · budgeted packed recall · savings ledger · recall guardrail + reversibility · `leptin bench` · local dashboard.
-- **Fast-follow:** Mem0 adapter (diet a store you already run) · `@leptin/client` TS SDK + npm dashboard · richer compaction scheduling · `sqlite-vec` fast path.
-- **Later:** pgvector / knowledge-graph backends · shared/team memory · adaptive budgets.
+- **v0.1:** MCP server + tools · SQLite backend · dedup/merge · decay · budgeted packed recall · savings ledger · recall guardrail + reversibility · `leptin bench` · local dashboard · `@leptin/client` TS SDK.
+- **v0.2 (now):** 🧬 **self-tuning** — closed-loop policy evolution with held-out evals, evolution ledger + rollback, meta-guardrail; merge/supersede-on-compact; offline zero-cost.
+- **v0.3 (next):** async tuning daemon · hosted prompt/intent optimization (opt-in) · recency-of-miss probe sampling · Mem0 adapter · `sqlite-vec` fast path.
+- **Later:** pgvector / knowledge-graph backends · shared/team memory.
 
 ---
 

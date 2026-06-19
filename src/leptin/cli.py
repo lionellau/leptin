@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from typing import Optional
 
@@ -17,11 +18,23 @@ def _print_json(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
+def _leptin_command() -> str:
+    """Resolve a command Claude Code can actually launch.
+
+    Prefer `leptin` if it's on PATH; otherwise fall back to the absolute path of
+    the installed console script (works for venv / non-PATH installs)."""
+    on_path = shutil.which("leptin")
+    if on_path:
+        return "leptin"
+    candidate = os.path.join(os.path.dirname(sys.executable), "leptin")
+    return candidate if os.path.exists(candidate) else "leptin"
+
+
 def _mcp_block(db_path: str) -> str:
     block = {
         "mcpServers": {
             "leptin": {
-                "command": "leptin",
+                "command": _leptin_command(),
                 "args": ["serve", "--db", db_path],
             }
         }
@@ -105,6 +118,20 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+def cmd_tune(args) -> int:
+    from leptin.api import Leptin
+
+    with Leptin(args.db) as mem:
+        if args.history:
+            _print_json(mem.tune_history())
+        elif args.rollback is not False:
+            version = None if args.rollback is True else int(args.rollback)
+            _print_json(mem.tune_rollback(version=version))
+        else:
+            _print_json(mem.tune(dry_run=args.dry_run))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="leptin",
@@ -165,6 +192,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--port", type=int, default=8765)
     sp.set_defaults(func=cmd_dashboard)
+
+    sp = sub.add_parser("tune", help="Self-tune the memory policy (offline, guardrailed).")
+    add_db(sp)
+    sp.add_argument("--dry-run", action="store_true", help="Preview the proposed change.")
+    sp.add_argument("--rollback", nargs="?", const=True, default=False,
+                    help="Undo the last tune, or restore a specific VERSION id.")
+    sp.add_argument("--history", action="store_true", help="Show the evolution ledger.")
+    sp.set_defaults(func=cmd_tune)
 
     return p
 

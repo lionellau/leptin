@@ -15,18 +15,30 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 import uuid
 from typing import Any, Optional
 
 from leptin.config import Config
 from leptin.embeddings import Embedder, LocalHashingEmbedder, cosine, make_embedder
 from leptin.guardrail import Guardrail, covers
-from leptin.llm import Merger, detect_contradiction, make_merger
+from leptin.llm import HeuristicMerger, Merger, detect_contradiction, make_merger
 from leptin.storage import Store
 from leptin.tokenizer import count_memory_tokens, count_tokens
+from leptin.tuner import Tuner
 
 _WORD = re.compile(r"[a-z0-9']+")
 MAX_CONTENT_CHARS = 20_000  # guard against pathological inputs
+
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Emit a one-time degradation warning to stderr (never stdout — that's the
+    MCP channel)."""
+    if key not in _warned:
+        _warned.add(key)
+        print(f"[leptin] {message}", file=sys.stderr, flush=True)
 
 
 class DietEngine:
@@ -45,10 +57,12 @@ class DietEngine:
         )
         self.merger = merger or make_merger(self.config.llm_model)
         self.guardrail = Guardrail(self)
+        self.tuner = Tuner(self)
         self.session_id = session_id or uuid.uuid4().hex
         self.session_start = self.store.now()
         # Offline mode → deterministic heuristic tokenizer; hosted → real tokenizer.
         self._offline = isinstance(self.embedder, LocalHashingEmbedder)
+        self._merger_offline = getattr(self.merger, "name", "") == "heuristic"
         self._tok_model = "heuristic" if self._offline else self.config.price_model
 
     # ------------------------------------------------------------------ utils
@@ -62,11 +76,16 @@ class DietEngine:
         """Embed with graceful degradation — never raises to the caller."""
         try:
             return self.embedder.embed(text)
-        except Exception:
-            # Hosted embedder unreachable: fall back to local so dedup/recall
-            # keep working (the caller also tolerates an empty vector).
+        except Exception as exc:
+            # Hosted embedder unreachable / SDK missing: fall back to local so
+            # dedup/recall keep working (the caller also tolerates an empty vector).
             try:
                 if not self._offline:
+                    _warn_once(
+                        "embed-downgrade",
+                        f"embedding model '{self.config.embedding_model}' unavailable "
+                        f"({type(exc).__name__}); falling back to local-hash embeddings.",
+                    )
                     self.embedder = LocalHashingEmbedder(self.config.embedding_dim)
                     self._offline = True
                     self._tok_model = "heuristic"
@@ -74,6 +93,33 @@ class DietEngine:
             except Exception:
                 pass
             return []
+
+    def _settle_embedder(self) -> None:
+        """Force any pending hosted→local fallback to happen now, so a sequence of
+        measurements (e.g. recall_before/after in a compaction) all use the same
+        embedder and stay comparable."""
+        if not self._offline:
+            self._embed("warmup")  # triggers the fallback in _embed on failure
+
+    def _safe_decide(self, older: str, newer: str, sim: float):
+        """Merge/supersede decision with graceful degradation — never raises.
+
+        If a hosted merger (LLM) is unreachable or its SDK is missing, fall back
+        to the offline HeuristicMerger persistently (mirrors `_embed`). This is
+        the PRD 8.1(d) edge case for the *merge* path.
+        """
+        try:
+            return self.merger.decide(older, newer, sim)
+        except Exception as exc:
+            if not self._merger_offline:
+                _warn_once(
+                    "merge-downgrade",
+                    f"merge model '{self.config.llm_model}' unavailable "
+                    f"({type(exc).__name__}); falling back to heuristic merge.",
+                )
+                self.merger = HeuristicMerger()
+                self._merger_offline = True
+            return self.merger.decide(older, newer, sim)
 
     def _decay_factor(self, last_accessed: float, now: float) -> float:
         half = self.config.decay_half_life_days
@@ -188,7 +234,7 @@ class DietEngine:
 
         # 1) Near-duplicate (sim ≥ τ): merge, or supersede on contradiction.
         if best is not None and best_sim >= self.config.dedup_threshold:
-            decision = self.merger.decide(best["content"], content, best_sim)
+            decision = self._safe_decide(best["content"], content, best_sim)
             if decision.action == "supersede":
                 stale = self._contradicting(scored, content)
                 return self._supersede(stale or [best], content, emb, new_tokens,
@@ -235,7 +281,7 @@ class DietEngine:
 
     def _fuse(self, best, content) -> str:
         # Delegate to the merger's fusion (heuristic or hosted) for the canonical text.
-        decision = self.merger.decide(best["content"], content, 1.0)
+        decision = self._safe_decide(best["content"], content, 1.0)
         return decision.content if decision.action == "merge" else content
 
     def _contradicting(
@@ -275,8 +321,12 @@ class DietEngine:
         self, query: str, token_budget: Optional[int] = None, k: Optional[int] = None
     ) -> dict[str, Any]:
         query = (query or "").strip()
-        budget = int(token_budget or self.config.token_budget_default)
-        k = int(k or self.config.recall_k)
+        # Treat only None as "unset" — a budget/k of 0 is an explicit ceiling,
+        # not a fallback to the default (the falsy-zero bug).
+        budget = int(self.config.token_budget_default if token_budget is None else token_budget)
+        k = int(self.config.recall_k if k is None else k)
+        budget = max(0, budget)
+        k = max(0, k)
         now = self.store.now()
 
         ranked = self._rank(query, now)
@@ -342,9 +392,9 @@ class DietEngine:
         guardrail can never PASS while the real recall path would drop a fact.
         """
         now = self.store.now() if now is None else now
-        budget = int(budget or self.config.token_budget_default)
-        k = int(k or self.config.recall_k)
-        return self._pack(self._rank(query, now)[:k], budget)
+        budget = int(self.config.token_budget_default if budget is None else budget)
+        k = int(self.config.recall_k if k is None else k)
+        return self._pack(self._rank(query, now)[: max(0, k)], max(0, budget))
 
     def _live_id(self, memory_id: str) -> Optional[str]:
         """Follow the supersede chain to the memory that currently carries a fact."""
@@ -363,29 +413,120 @@ class DietEngine:
 
     # ---------------------------------------------------------------- compact
     def compact(self, dry_run: bool = False) -> dict[str, Any]:
-        return self.guardrail.guarded_compact(dry_run=dry_run)
+        report = self.guardrail.guarded_compact(dry_run=dry_run)
+        # Outer loop: opt-in self-tuning runs at the tail of a real compaction.
+        if not dry_run and self.config.self_tune_enabled:
+            try:
+                should, trig = self.tuner.should_tune(self.store.now())
+                if should:
+                    report["tuning"] = self.tuner.tune(trigger=trig)
+            except Exception as exc:  # never let tuning break compaction
+                report["tuning_error"] = str(exc)
+        return report
+
+    def _recall_eval(self, query: str, now: Optional[float] = None) -> dict[str, int]:
+        """Read-only recall metrics (actual vs naive-baseline tokens) for a query.
+        Used by the tuner's evaluator; no side effects."""
+        now = self.store.now() if now is None else now
+        ranked = self._rank(query, now)
+        injected = self._pack(ranked[: self.config.recall_k], self.config.token_budget_default)
+        actual = self._mtok(injected)
+        by_sim = sorted((r for r in ranked if r["sim"] > 0),
+                        key=lambda r: r["sim"], reverse=True)
+        baseline = self._mtok([r["memory"] for r in by_sim[: self.config.naive_top_k]])
+        return {"actual_tokens": actual, "baseline_tokens": baseline}
 
     def plan_compaction(self, now: float) -> dict[str, Any]:
-        """Compute (but do not apply) the set of prune/merge actions."""
+        """Compute (but do not apply) the set of prune/merge/supersede actions.
+
+        - **decay**: active memories whose effective strength fell below the floor.
+        - **merge**: leftover same-subject near-duplicates (sim ≥ τ) that slipped
+          past write-time dedup — consolidate the weaker into the stronger.
+        - **supersede**: same-subject contradictions still both active — the newer
+          wins, the older is marked superseded.
+        """
         actives = self.store.list_memories(status="active")
-        decayed = []
-        for m in actives:
-            if self.effective_strength(m, now) < self.config.strength_floor:
-                decayed.append(m)
-        return {"decayed": decayed}
+        decay_ids = {
+            m["id"] for m in actives
+            if self.effective_strength(m, now) < self.config.strength_floor
+        }
+        decayed = [m for m in actives if m["id"] in decay_ids]
+
+        # Pairwise consolidation among the survivors (skip decay-eligible ones).
+        survivors = [m for m in actives if m["id"] not in decay_ids]
+        merges: list[tuple[dict, dict]] = []      # (winner, loser→merged-away)
+        supersedes: list[tuple[dict, dict]] = []  # (newer-winner, older-loser)
+        consumed: set[str] = set()
+        by_subject: dict[Any, list[dict]] = {}
+        for m in survivors:
+            by_subject.setdefault(m.get("subject"), []).append(m)
+        for group in by_subject.values():
+            for i in range(len(group)):
+                a = group[i]
+                if a["id"] in consumed or not a.get("embedding"):
+                    continue
+                for j in range(i + 1, len(group)):
+                    b = group[j]
+                    if b["id"] in consumed or not b.get("embedding"):
+                        continue
+                    sim = self._similarity(a["content"], a["embedding"], b)
+                    if sim < self.config.contradiction_threshold:
+                        continue
+                    if detect_contradiction(a["content"], b["content"]):
+                        newer, older = (a, b) if a["created_at"] >= b["created_at"] else (b, a)
+                        supersedes.append((newer, older))
+                        consumed.add(older["id"])
+                        if older is a:
+                            break
+                    elif sim >= self.config.dedup_threshold:
+                        # Keep the stronger; merge the weaker's content into it.
+                        keep, drop = (
+                            (a, b) if self.effective_strength(a, now) >= self.effective_strength(b, now)
+                            else (b, a)
+                        )
+                        merges.append((keep, drop))
+                        consumed.add(drop["id"])
+                        if drop is a:
+                            break
+        return {"decayed": decayed, "merges": merges, "supersedes": supersedes}
 
     def apply_compaction(self, plan: dict[str, Any], now: float) -> dict[str, Any]:
         """Apply a compaction plan in-place (caller manages the transaction)."""
-        decayed_ids = []
+        decayed_ids: list[str] = []
+        merged_ids: list[str] = []
+        superseded_ids: list[str] = []
         freed = 0
         until = now + self.config.reversible_window_days * 86400.0
+
         for m in plan["decayed"]:
             self.store.update_memory(m["id"], status="quarantined", reversible_until=until)
             self.store.add_event(m["id"], "decay",
                                  reason="strength below floor", token_delta=-m["tokens"])
             decayed_ids.append(m["id"])
             freed += m["tokens"]
-        return {"decayed": decayed_ids, "merged": [], "superseded": [], "freed_tokens": freed}
+
+        for keep, drop in plan.get("merges", []):
+            fused = self._fuse(keep, drop["content"])
+            fused_tokens = self._tok(fused)
+            self.store.update_memory(keep["id"], content=fused,
+                                     embedding=self._embed(fused), tokens=fused_tokens)
+            self.store.update_memory(drop["id"], status="superseded", superseded_by=keep["id"])
+            self.store.add_event(keep["id"], "merge",
+                                 reason="compaction consolidated a near-duplicate",
+                                 token_delta=-drop["tokens"])
+            merged_ids.append(drop["id"])
+            freed += drop["tokens"]
+
+        for newer, older in plan.get("supersedes", []):
+            self.store.update_memory(older["id"], status="superseded", superseded_by=newer["id"])
+            self.store.add_event(older["id"], "supersede",
+                                 reason="compaction resolved a contradiction",
+                                 token_delta=-older["tokens"])
+            superseded_ids.append(older["id"])
+            freed += older["tokens"]
+
+        return {"decayed": decayed_ids, "merged": merged_ids,
+                "superseded": superseded_ids, "freed_tokens": freed}
 
     # ----------------------------------------------------------------- forget
     def forget(self, memory_id: Optional[str] = None, query: Optional[str] = None) -> dict[str, Any]:
@@ -531,6 +672,11 @@ class DietEngine:
         ).fetchone()
         guardrail_status = dict(last_run) if last_run else None
 
+        note = None
+        if tokens_saved == 0 and footprint_reduced == 0:
+            note = ("No savings recorded yet — savings appear once memories "
+                    "overlap (dedup/merge) or recall hits the token budget.")
+
         return {
             "window": window,
             "tokens_saved": tokens_saved,
@@ -541,7 +687,13 @@ class DietEngine:
             "active_memories": self.store.count_memories("active"),
             "guardrail_status": guardrail_status,
             "top_savers": top_savers,
+            "note": note,
+            "tuning": self._tuning_report(),
         }
+
+    def _tuning_report(self) -> Optional[dict[str, Any]]:
+        """Self-tuning summary block (None until the tuner has run)."""
+        return self.tuner.report() if getattr(self, "tuner", None) else None
 
     # ------------------------------------------------------------------ views
     def _public_memory(self, mem: dict[str, Any]) -> dict[str, Any]:

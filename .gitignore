@@ -31,3 +31,4 @@ dashboard/dist/
 # Secrets
 .env
 .env.*
+.gstack/

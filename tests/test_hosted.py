@@ -113,6 +113,30 @@ def test_hosted_voyage_embedding(monkeypatch):
 
 
 # -------------------------------------------------- graceful degradation
+def test_hosted_merger_unavailable_degrades_on_near_duplicate(monkeypatch):
+    """PRD 8.1(d): a hosted LLM merger that's unreachable must NOT crash
+    remember() when a near-duplicate hits the merge path — it falls back to the
+    heuristic merger (regression for the audit-found ConnectionError)."""
+    from leptin.config import Config
+    from leptin.engine import DietEngine
+    from leptin.storage import Store
+
+    class _RaisingMerger:
+        name = "hosted"
+
+        def decide(self, older, newer, similarity):
+            raise ConnectionError("LLM API unreachable")
+
+    store = Store(":memory:")
+    engine = DietEngine(store, Config(), merger=_RaisingMerger())
+    engine.remember("The deploy target is Fly.io.", subject="infra")
+    # Exact duplicate → hits the merge/supersede path → would call merger.decide.
+    r = engine.remember("The deploy target is Fly.io.", subject="infra")
+    assert r["action"] in ("created", "merged", "superseded")  # no exception
+    assert engine._merger_offline is True  # degraded persistently
+    store.close()
+
+
 def test_hosted_unavailable_degrades_to_local(monkeypatch):
     """If a hosted model is configured but the SDK/key is missing, the engine
     must fall back to local embeddings rather than crash (PRD edge case)."""
