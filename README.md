@@ -4,7 +4,9 @@
 
 ### Keep your coding agent's memory *correct* when decisions change.
 
-**You switch `pnpm`→`bun`, change the deploy region, swap the auth scheme — and weeks later the agent is *still acting on the version you abandoned*. Leptin is a local-first control loop that keeps long-term memory correct over time: it runs on your agent's existing hooks to resolve contradictions so the *current* decision wins, make hard-won lessons stick, and — before it forgets anything — prove you can still recall what matters. It's not a store and not a compressor; it runs alongside whichever you use.**
+**You switch `pnpm`→`bun` — and weeks later your agent is *still acting on the version you abandoned*. Leptin keeps long-term memory correct when decisions change: the current decision wins, lessons stick, and nothing is forgotten without proving recall survived.**
+
+Not a store, not a compressor — a local control loop that runs on your agent's hooks, *alongside* whatever you use. (Today it's its own local SQLite store; a "governor mode" over your existing Mem0/pgvector is on the [roadmap](#roadmap), not shipped.)
 
 [![CI](https://github.com/lionellau/leptin/actions/workflows/ci.yml/badge.svg)](https://github.com/lionellau/leptin/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/leptin-hlp?color=3fb950)](https://pypi.org/project/leptin-hlp/)
@@ -47,7 +49,7 @@ Probably not the part that bites. Leptin sits on a **different axis** from a sto
 |---|---|
 | "Isn't this just **dedup**?" | Dedup removes *copies*. Leptin decides which of two *conflicting* facts is current (`pnpm` vs `bun`) and retires the old one — reversibly, auditably. |
 | "Doesn't my **context-compressor** (e.g. Headroom) cover it?" | Different job. A compressor shrinks what the agent reads *this turn*; Leptin keeps the *stored* facts consistent *over weeks*. They barely overlap — run both. |
-| "Isn't this just another **store** (e.g. Mem0)?" | A store retrieves by similarity; it doesn't adjudicate which fact is *currently true* or prove a prune didn't cost you something. Leptin is the correctness loop you wrap around a store. |
+| "Isn't this just another **store** (e.g. Mem0)?" | A store retrieves by similarity; it doesn't adjudicate which fact is *currently true* or prove a prune didn't cost you something. Leptin is that correctness loop — today as its own local store; a governor mode over *your* store is roadmap. |
 | "Does it need an **API key / a service**?" | No. Local-first, zero core deps; offline for lexical/antonym/numeric reversals, hosted embeddings for semantic ones. Your DB stays a single local file. |
 
 > The token footprint also drops ~65%, but we report that *honestly*: most of it is budget-packing (the axis a compressor also helps with); the **correctness loop is the part nothing else does**. Don't take our word — reproduce both numbers with `leptin bench`, and see the [honest offline limits](#design).
