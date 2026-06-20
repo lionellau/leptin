@@ -38,3 +38,13 @@ dashboard/dist/
 .env
 .env.*
 .gstack/
+
+# Internal / GTM / planning docs — keep private, never publish.
+# Put any internal-only doc in internal/ or name it *.internal.md.
+LAUNCH.md
+internal/
+*.internal.md
+*-PRD.md
+PRD*.md
+ROADMAP-internal*.md
+GTM*.md
