@@ -52,6 +52,11 @@ def cmd_serve(args) -> int:
 def cmd_bench(args) -> int:
     from leptin import bench
 
+    if getattr(args, "eval_contradiction", False):
+        path = args.eval_contradiction if isinstance(args.eval_contradiction, str) else None
+        res = bench.eval_contradiction(path)
+        _print_json(res)
+        return 0 if res["f1"] >= 0.7 else 1
     r = bench.main(budget=args.budget, naive_top_k=args.top_k, dataset=args.dataset,
                    limit=args.limit, embedding_model=args.embedding_model,
                    llm_model=args.llm_model)
@@ -123,6 +128,30 @@ def cmd_health(args) -> int:
     return 0
 
 
+def cmd_conflicts(args) -> int:
+    from leptin.api import Leptin
+
+    with Leptin(args.db) as mem:
+        _print_json(mem.conflicts())
+    return 0
+
+
+def cmd_superseded(args) -> int:
+    from leptin.api import Leptin
+
+    with Leptin(args.db) as mem:
+        _print_json(mem.superseded(limit=args.limit))
+    return 0
+
+
+def cmd_reembed(args) -> int:
+    from leptin.api import Leptin
+
+    with Leptin(args.db) as mem:
+        _print_json(mem.reembed())
+    return 0
+
+
 def cmd_recall(args) -> int:
     from leptin.api import Leptin
 
@@ -170,7 +199,10 @@ def cmd_hook(args) -> int:
         payload = {}
     event = (args.event or payload.get("hook_event_name") or "").lower().replace("_", "-")
     try:
-        with Leptin(args.db) as mem:
+        # Derive the session id from the host payload so SessionStart and
+        # UserPromptSubmit in the same host session share one id (no double-count
+        # of cross-session recurrence in the usefulness loop).
+        with Leptin(args.db, session_id=payload.get("session_id")) as mem:
             if event in ("session-start", "sessionstart", "user-prompt-submit", "userpromptsubmit"):
                 query = payload.get("prompt") or payload.get("user_prompt")
                 ctx = mem.session_context(query=query)
@@ -180,8 +212,9 @@ def cmd_hook(args) -> int:
                     print(json.dumps({"hookSpecificOutput": {
                         "hookEventName": hook_event, "additionalContext": text}}))
             elif event in ("post-tool-use", "posttooluse"):
-                # Mistake→lesson loop: a failed tool call becomes a never-decaying,
-                # auto-re-injected anti-pattern lesson (dedup prevents spam).
+                # Mistake→lesson loop: a *genuinely failed* tool call becomes a
+                # decaying candidate lesson that graduates to permanent only if it
+                # recurs (so the corpus stays bounded — no minting from benign output).
                 lesson = _lesson_from_failure(payload)
                 if lesson:
                     mem.capture_lesson(lesson)
@@ -193,13 +226,23 @@ def cmd_hook(args) -> int:
 
 
 def _lesson_from_failure(payload: dict) -> Optional[str]:
-    """Heuristically turn a failed PostToolUse payload into an anti-pattern line."""
+    """Turn a *genuinely failed* PostToolUse payload into an anti-pattern line.
+
+    Gated on real failure signals (is_error / non-zero return / non-empty stderr /
+    an explicit error field) — NOT on the substring "error"/"fail" appearing in
+    otherwise-benign output, which used to mint permanent lessons from nothing."""
     resp = payload.get("tool_response") or payload.get("tool_result") or {}
-    is_error = bool(payload.get("is_error") or (isinstance(resp, dict) and resp.get("is_error")))
-    text = resp.get("error") if isinstance(resp, dict) else None
-    text = text or (resp if isinstance(resp, str) else "") or str(payload.get("error") or "")
-    if not is_error and "error" not in text.lower() and "fail" not in text.lower():
+    rd = resp if isinstance(resp, dict) else {}
+    rc = rd.get("returncode", rd.get("exit_code"))
+    is_error = bool(
+        payload.get("is_error") or rd.get("is_error") or payload.get("error")
+        or (isinstance(rc, int) and rc != 0)
+        or (isinstance(rd.get("stderr"), str) and rd.get("stderr").strip())
+    )
+    if not is_error:
         return None
+    text = (rd.get("error") or rd.get("stderr")
+            or (resp if isinstance(resp, str) else "") or str(payload.get("error") or ""))
     tool = payload.get("tool_name") or payload.get("tool") or "a tool"
     cmd = ""
     ti = payload.get("tool_input") or {}
@@ -274,7 +317,9 @@ def cmd_doctor(args) -> int:
     # --- models / hosted readiness ---
     emb = cfg.embedding_model
     if emb in ("local-hash", "heuristic", "offline"):
-        add("ok", "Embeddings", f"{emb} (offline, no API key needed)")
+        add("warn", "Embeddings", f"{emb} (offline) — lexical dedup/contradiction only; "
+            f"semantic reversals (e.g. paraphrases) need hosted embeddings "
+            f"(pip install leptin-hlp[hosted])")
     else:
         pkg = "voyageai" if emb.startswith("voyage") else "openai"
         have_pkg = importlib.util.find_spec(pkg) is not None
@@ -311,6 +356,15 @@ def cmd_doctor(args) -> int:
         add("ok", "Guardrail", "no compactions yet" if not run else
             f"last: {'passed' if run['passed'] else 'failed'}"
             f"{', rolled back' if run['rolled_back'] else ''}")
+        h = mem.health()
+        hlvl = "ok" if h["grade"] in ("A", "B") else "warn"
+        extra = f" · {h['conflicts']} conflict(s)" if h.get("conflicts") else ""
+        add(hlvl, "Memory health",
+            f"score {h['score']}/100 ({h['grade']}) · {h['active']} active · "
+            f"stale {h['stale_rate']} · noise {h['noise_rate']}{extra}")
+        if h.get("embedder_drift"):
+            add("warn", "Embedder drift",
+                "active memories carry >1 embedder (a hosted→local fallback?) — run `leptin reembed`")
         mem.close()
 
     icons = {"ok": "✓", "warn": "⚠", "error": "✗"}
@@ -365,6 +419,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--embedding-model", default="local-hash",
                     help="e.g. text-embedding-3-small (needs leptin-hlp[hosted] + API key).")
     sp.add_argument("--llm-model", default="heuristic", help="e.g. gpt-4o-mini for merges.")
+    sp.add_argument("--eval-contradiction", nargs="?", const=True, default=False,
+                    help="Eval the contradiction detector (precision/recall/F1) on a labeled "
+                         "JSONL (default: bundled set).")
     sp.add_argument("--json", action="store_true", help="Also print the raw result JSON.")
     sp.set_defaults(func=cmd_bench)
 
@@ -407,6 +464,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("health", help="Memory-health score + drift flags.")
     add_db(sp)
     sp.set_defaults(func=cmd_health)
+
+    sp = sub.add_parser("conflicts", help="List possible contradictions flagged for review.")
+    add_db(sp)
+    sp.set_defaults(func=cmd_conflicts)
+
+    sp = sub.add_parser("superseded", help="List superseded memories + what replaced them.")
+    add_db(sp)
+    sp.add_argument("--limit", type=int, default=50)
+    sp.set_defaults(func=cmd_superseded)
+
+    sp = sub.add_parser("reembed", help="Re-embed active memories with the current embedder.")
+    add_db(sp)
+    sp.set_defaults(func=cmd_reembed)
 
     sp = sub.add_parser("hook", help="Lifecycle-hook entrypoint for Claude Code / Codex.")
     add_db(sp)

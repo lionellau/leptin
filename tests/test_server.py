@@ -37,7 +37,7 @@ def test_initialize_and_tool_list():
     # Lean default surface: only what the model should call.
     names = [t["name"] for t in _by_id(resp, 2)["result"]["tools"]]
     assert set(names) == {"remember", "recall"}
-    assert len(TOOLS) == 8  # full set still defined, exposed only with =all
+    assert len(TOOLS) == 9  # full set still defined, exposed only with =all
 
 
 def test_all_tools_exposed_with_env(monkeypatch):
@@ -45,7 +45,14 @@ def test_all_tools_exposed_with_env(monkeypatch):
     resp = _run([{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
     names = {t["name"] for t in _by_id(resp, 2)["result"]["tools"]}
     assert names == {"remember", "recall", "compact", "forget", "restore",
-                     "inspect", "diet_report", "self_tune"}
+                     "inspect", "diet_report", "record_feedback", "self_tune"}
+
+
+def test_mcp_tools_env_explicit_list(monkeypatch):
+    monkeypatch.setenv("LEPTIN_MCP_TOOLS", "remember,recall,record_feedback")
+    resp = _run([{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
+    names = {t["name"] for t in _by_id(resp, 2)["result"]["tools"]}
+    assert names == {"remember", "recall", "record_feedback"}
 
 
 def test_all_seven_tools_callable():

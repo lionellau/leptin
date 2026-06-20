@@ -4,6 +4,68 @@ All notable changes to Leptin are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-06-20
+
+The **credibility** release. An 8-persona adversarial review (senior engineers who
+use Headroom) found the two flagship claims were *asserted, not measured*, and
+oversold on the offline default. This release makes them true, measured, and
+honestly scoped — the wedge that survives is **correctness-of-state over time**.
+
+### Fixed (correctness blockers)
+- **Contradiction-supersede no longer no-ops offline on real edits.** A graded
+  detector (`leptin.llm.contradiction_signal`) confidently catches negation flips,
+  antonyms, single-slot value swaps (`pnpm`→`bun`, `dark`→`light`), and numeric
+  reversals (`14 days`→`30 days`) — and, crucially, **stops burying a true fact** on
+  a loose numeric match (`8 cpu cores` vs `32 gb ram`). Uncertain conflicts are
+  **flagged for review** (`leptin conflicts`), never silently coexisting or wrongly
+  deleted. Verify it: `leptin bench --eval-contradiction` (bundled set: precision
+  1.0, recall ~0.87, zero true facts buried).
+- **The recall guardrail is no longer circular.** It verifies the *fact* still
+  resolves (not just that an id survived), so a merge that keeps the id but drops the
+  value is caught; it no longer carves "noise" out of its protected set; and it
+  reports `low_confidence` / `verbatim_probe_fraction` so a lexical-embedder run is
+  honest about its resolution.
+- **Session-start injection now respects the budget.** Lessons are ranked and packed
+  under a lesson sub-budget (`lesson_budget_frac`) with a `+N more` pointer, instead
+  of bypassing the budget and growing unbounded; the push path now feeds the
+  usefulness loop (it was invisible before).
+
+### Added
+- **Correctness benchmark** (`leptin bench`, now correctness-first): after a reversed
+  decision a naive store serves the **outdated** fact 100% of the time vs Leptin **0%**
+  (0% recall loss). The token number is split into **packing** (budget+floor) vs
+  **governance** (dedup/supersede/decay) so it can't proxy for correctness.
+- **Reframed flywheel:** recurrence (`recur_sessions`, a weak ranking tiebreaker) is
+  separated from usefulness (explicit `record_feedback`, now also an MCP tool). A
+  single `harmful` mark only down-weights and is reversible; it takes two to flag
+  stale / drop guardrail protection. A strong, genuinely-used memory is never noise.
+- **Reversible, discoverable supersede:** write-time supersedes get a reversible
+  window and a review surface (`leptin superseded`); old rows are swept after the
+  window, not leaked.
+- **Bounded, demotable lessons:** auto-captured lessons are *candidates* that decay
+  and graduate only on recurrence; auto-capture is gated on a real failure signal
+  (not the substring "error"); `max_auto_lessons` caps the corpus. Hand-authored
+  lessons stay permanent.
+- **Embedder provenance + recovery:** every vector is tagged (`local-hash:256`); a
+  hosted outage degrades *non-permanently* (cooldown + retry, not a permanent pin);
+  `leptin reembed` re-vectorises; `doctor`/`health` flag embedder drift.
+- **Scale + integrity:** LRU-bounded vector cache, subject-scoped (NULL-safe) dedup,
+  optional `rank_candidate_limit` prefilter, 30s busy-timeout; deterministic tuner
+  split (blake2b, not salted `hash()`); a floor-free normalized health score; and the
+  noise/penalty/lesson/decay constants promoted to `Config` (locked against the tuner).
+- `record_feedback` MCP tool; `LEPTIN_MCP_TOOLS` now also accepts an explicit list.
+
+### Changed
+- Docs/positioning scoped honestly: the supersede guarantee names its offline limits;
+  the 66% is attributed (packing vs governance); "runs on top of YOUR store" softened
+  to "self-contained store *with* a correctness loop, runs alongside your compressor"
+  (the external-store governor is roadmap, not shipped). `config.backend != sqlite`
+  now warns and falls back instead of silently doing nothing.
+
+### Storage
+- Schema v5: `recur_sessions`, `last_inject_at`, `embedder`, `conflicts_with`
+  (migrates in place; additive, reversible).
+
 ## [1.2.0] — 2026-06-20
 
 The **feedback-loop** release. Sharpens the positioning from "memory governor" to a

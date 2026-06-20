@@ -22,6 +22,7 @@ load time (it constructs candidate engines lazily) to avoid a circular import.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from typing import TYPE_CHECKING, Any, Optional
 
 from leptin.config import Config
@@ -49,12 +50,19 @@ STEP_GRID: dict[str, tuple[float, ...]] = {
     "access_boost": (0.8, 1.0, 1.2),
 }
 
-# Never proposed by the tuner (anti-Goodhart / anti-misevolution).
+# Never proposed by the tuner (anti-Goodhart / anti-misevolution). Includes the
+# v1.3 safety/correctness knobs: the noise, lesson, harmful, drift, and detector
+# constants must stay where a human (not a self-optimiser) put them.
 LOCKED_KNOBS = frozenset({
     "guardrail_max_drop", "max_probes", "reversible_window_days", "recall_k",
     "naive_top_k", "embedding_model", "llm_model", "price_model", "price_table",
     "embedding_dim", "backend", "contradiction_threshold", "dedup_threshold",
     "recall_min_sim",
+    "stale_penalty", "harmful_penalty", "forget_min_sim", "noise_inject_count",
+    "recur_cooldown_seconds", "harmful_stale_threshold", "drift_stale_rate",
+    "drift_noise_rate", "lesson_budget_frac", "max_auto_lessons",
+    "candidate_lesson_half_life_days", "procedural_halflife_mult",
+    "task_halflife_mult", "rank_candidate_limit",
 })
 
 OBJECTIVE_W = {"balanced": 0.5, "savings": 0.8, "recall": 0.2}
@@ -154,7 +162,11 @@ class Tuner:
     def _split_probes(probes: list[dict[str, Any]]):
         visible, held = [], []
         for p in probes:
-            bucket = hash(p["question"]) % 5
+            # blake2b, not builtin hash(): the latter is salted per-process
+            # (PYTHONHASHSEED), which silently broke the module's 'deterministic'
+            # contract and could vary/empty the held set run-to-run.
+            digest = hashlib.blake2b(p["question"].encode("utf-8"), digest_size=8).digest()
+            bucket = int.from_bytes(digest, "big") % 5
             (held if bucket == 0 else visible).append(p)
         # Small stores: fall back to gating on whatever we have.
         if not held:

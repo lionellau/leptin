@@ -38,6 +38,11 @@ class Config:
     recall_k: int = 50
     """How many candidate memories to consider before packing."""
 
+    rank_candidate_limit: int = 0
+    """If > 0, prefilter to this many cheap keyword/subject candidates before the
+    full cosine scan in `_rank` (a scale guard for large stores). 0 = scan all
+    (exact, the default for correctness)."""
+
     naive_top_k: int = 10
     """The baseline a naive store would dump into context (for savings math)."""
 
@@ -62,11 +67,62 @@ class Config:
     decay_half_life_days: float = 14.0
     """Days for an un-accessed memory's strength to halve (Ebbinghaus-style)."""
 
+    procedural_halflife_mult: float = 2.0
+    """How-to/workflow memories decay this many times *slower* than facts."""
+
+    task_halflife_mult: float = 0.4
+    """Ticket-scoped task notes decay this many times *faster* than facts.
+    (Facts use 1.0 by definition; lessons never decay.)"""
+
     strength_floor: float = 0.15
     """Memories whose effective strength drops below this are prune-eligible."""
 
     access_boost: float = 0.4
     """Strength added (capped at 1.0) each time a memory is recalled."""
+
+    stale_penalty: float = 0.25
+    """Recall-score multiplier for a memory whose source_ref changed (down-weight, don't hide)."""
+
+    harmful_penalty: float = 0.4
+    """Strength multiplier applied *per* 'harmful' feedback mark."""
+
+    forget_min_sim: float = 0.55
+    """Similarity floor for query-targeted `forget` to select a memory."""
+
+    # --- Usefulness loop / noise ---
+    noise_inject_count: int = 5
+    """Injected at least this many times with zero usefulness → treated as noise.
+    Noise is prune-eligible ONLY when also below the strength floor (a strong,
+    genuinely-used memory is never noise)."""
+
+    recur_cooldown_seconds: float = 3600.0
+    """A re-injection after at least this long counts as a 'needed it again' recurrence
+    signal even within one session (recency-gated, so back-to-back recalls don't inflate it)."""
+
+    harmful_stale_threshold: int = 2
+    """'harmful' marks needed before a memory is flagged stale AND dropped from the
+    guardrail's protected set. The first mark only down-weights — one noisy/adversarial
+    signal shouldn't both cripple recall and blind the safety net."""
+
+    drift_stale_rate: float = 0.25
+    """Health: flag drift when the stale fraction exceeds this."""
+
+    drift_noise_rate: float = 0.25
+    """Health: flag drift when the noise fraction exceeds this."""
+
+    # --- Lessons policy ---
+    lesson_budget_frac: float = 0.5
+    """Fraction of the session-start token budget reserved for lessons (the rest
+    goes to query-relevant memories). Lessons are ranked + packed under this
+    sub-budget so a growing lesson corpus can't blow the whole context."""
+
+    max_auto_lessons: int = 200
+    """Cap on *auto-captured* candidate lessons; the least-useful are retired
+    (reversibly) past this. Hand-authored lessons are exempt and always kept."""
+
+    candidate_lesson_half_life_days: float = 30.0
+    """Auto-captured lessons decay on this half-life until they 'graduate' (recur /
+    confirmed); hand-authored lessons never decay."""
 
     # --- Recall guardrail ---
     guardrail_max_drop: float = 0.02
@@ -150,6 +206,12 @@ class Config:
         self.guardrail_max_drop = clamp(self.guardrail_max_drop, 0.0, 1.0)
         self.recall_rel_floor = clamp(self.recall_rel_floor, 0.0, 1.0)
         self.recall_min_sim = clamp(self.recall_min_sim, 0.0, 1.0)
+        self.stale_penalty = clamp(self.stale_penalty, 0.0, 1.0)
+        self.harmful_penalty = clamp(self.harmful_penalty, 0.0, 1.0)
+        self.forget_min_sim = clamp(self.forget_min_sim, 0.0, 1.0)
+        self.drift_stale_rate = clamp(self.drift_stale_rate, 0.0, 1.0)
+        self.drift_noise_rate = clamp(self.drift_noise_rate, 0.0, 1.0)
+        self.lesson_budget_frac = clamp(self.lesson_budget_frac, 0.0, 1.0)
         # Cosine thresholds: allow up to 2.0 to mean "disable".
         self.dedup_threshold = clamp(self.dedup_threshold, 0.0, 2.0)
         self.contradiction_threshold = clamp(self.contradiction_threshold, 0.0, 2.0)
@@ -159,9 +221,18 @@ class Config:
         self.naive_top_k = max(1, int(self.naive_top_k))
         self.max_probes = max(1, int(self.max_probes))
         self.embedding_dim = max(1, int(self.embedding_dim))
+        self.noise_inject_count = max(1, int(self.noise_inject_count))
+        self.harmful_stale_threshold = max(1, int(self.harmful_stale_threshold))
+        self.max_auto_lessons = max(1, int(self.max_auto_lessons))
+        self.rank_candidate_limit = max(0, int(self.rank_candidate_limit))
+        # Multipliers (positive)
+        self.procedural_halflife_mult = max(0.0, float(self.procedural_halflife_mult))
+        self.task_halflife_mult = max(0.0, float(self.task_halflife_mult))
         # Non-negative durations
         self.decay_half_life_days = max(0.0, float(self.decay_half_life_days))
         self.reversible_window_days = max(0.0, float(self.reversible_window_days))
+        self.recur_cooldown_seconds = max(0.0, float(self.recur_cooldown_seconds))
+        self.candidate_lesson_half_life_days = max(0.0, float(self.candidate_lesson_half_life_days))
         # Self-tuning knobs
         self.tune_recall_floor = clamp(self.tune_recall_floor, 0.0, 1.0)
         self.tune_epsilon = clamp(self.tune_epsilon, 0.0, 1.0)
@@ -173,6 +244,19 @@ class Config:
         self.tune_freeze_days = max(0.0, float(self.tune_freeze_days))
         if self.tune_objective not in ("balanced", "savings", "recall"):
             self.tune_objective = "balanced"
+        # The non-sqlite backends are not yet wired (no adapter ships in v1.x):
+        # the loop currently governs Leptin's own SQLite. Warn rather than
+        # silently pretend a `backend=mem0` switch does anything.
+        if self.backend != "sqlite":
+            import warnings
+
+            warnings.warn(
+                f"backend={self.backend!r} is not yet wired — Leptin currently runs its "
+                f"control loop over its own SQLite store. Falling back to 'sqlite'. "
+                f"(External-store adapters are on the roadmap.)",
+                stacklevel=2,
+            )
+            self.backend = "sqlite"
 
     def input_price_per_token(self) -> float:
         entry = self.price_table.get(self.price_model) or self.price_table.get(

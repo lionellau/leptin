@@ -18,7 +18,7 @@ def test_recall_increments_inject_count(mem):
     assert mem.inspect(memory_id=r["memory_id"])["memory"]["inject_count"] >= 1
 
 
-def test_recurrence_across_sessions_marks_useful(make_mem, clock):
+def test_recurrence_across_sessions_marks_recurrence_not_useful(make_mem, clock):
     from leptin.api import Leptin
     # Same on-disk store, two different sessions (fresh Leptin → new session id).
     import tempfile
@@ -29,20 +29,37 @@ def test_recurrence_across_sessions_marks_useful(make_mem, clock):
     a.close()
     clock.advance(1)
     b = Leptin(db, Config(), clock=clock, session_id="session-B")  # a different session
-    b.recall("where are prod secrets?")     # needed again in a later session → useful
-    assert b.inspect(memory_id=r["memory_id"])["memory"]["useful_count"] >= 1
+    b.recall("where are prod secrets?")     # needed again in a later session → recurrence
+    info = b.inspect(memory_id=r["memory_id"])["memory"]
+    # Recurrence is a WEAK signal (recur_sessions), NOT proof it helped: useful_count
+    # stays 0 until explicit feedback. This is the v1.3 flywheel fix.
+    assert info["recur_sessions"] >= 1
+    assert info["useful_count"] == 0
     b.close()
     os.remove(db)
 
 
-def test_harmful_feedback_downweights(mem):
+def test_harmful_feedback_is_graded(mem):
     r = mem.remember("The API base path is /v1.", subject="api")
     before = mem.inspect(memory_id=r["memory_id"])["strength"]
-    out = mem.record_feedback([r["memory_id"]], "harmful")
-    assert out["count"] == 1
+    # ONE harmful mark down-weights but does NOT yet flag stale or drop guardrail
+    # protection — a single noisy/adversarial signal shouldn't do all three.
+    mem.record_feedback([r["memory_id"]], "harmful")
     info = mem.inspect(memory_id=r["memory_id"])["memory"]
-    assert info["harmful_count"] == 1 and info["stale"] is True
+    assert info["harmful_count"] == 1 and info["stale"] is False
     assert mem.inspect(memory_id=r["memory_id"])["strength"] < before  # down-weighted
+    # A SECOND harmful crosses the threshold → now flagged stale for review.
+    mem.record_feedback([r["memory_id"]], "harmful")
+    info2 = mem.inspect(memory_id=r["memory_id"])["memory"]
+    assert info2["harmful_count"] == 2 and info2["stale"] is True
+
+
+def test_useful_reverses_a_harmful_mark(mem):
+    r = mem.remember("The frontend is React + Vite.", subject="stack")
+    mem.record_feedback([r["memory_id"]], "harmful")
+    mem.record_feedback([r["memory_id"]], "useful")  # reverses the (wrong) downvote
+    info = mem.inspect(memory_id=r["memory_id"])["memory"]
+    assert info["useful_count"] == 1 and info["harmful_count"] == 0
 
 
 def test_useful_feedback_reinforces(mem):
@@ -51,18 +68,29 @@ def test_useful_feedback_reinforces(mem):
     assert mem.inspect(memory_id=r["memory_id"])["memory"]["useful_count"] == 1
 
 
-def test_noise_memory_is_pruned_by_compaction(make_mem):
-    """A memory injected many times that never proves useful is safely pruned;
-    the recall-usefulness loop's prune signal, guardrailed."""
+def test_heavy_intrasession_use_is_not_mislabeled_noise(make_mem):
+    """v1.3 flywheel fix: a memory injected many times *this session* is reinforced
+    (strong), so it is NOT mistaken for noise and quarantined — the old false
+    positive. Pruning is decay-gated; a strong memory survives."""
     m = make_mem(Config())
-    noise = m.remember("Filler note that matches a recurring query but never helps.",
-                       subject="filler")
-    # An unrelated, genuinely-used memory that must survive.
-    keep = m.remember("The database is Postgres.", subject="db")
-    for _ in range(6):  # inject the noise repeatedly (> _NOISE_INJECTS), same session
+    r = m.remember("Filler note that keeps matching a recurring query.", subject="filler")
+    for _ in range(6):  # injected repeatedly in one session → reinforced, not noise
         m.recall("filler note recurring query")
+    m.compact()
+    assert m.inspect(memory_id=r["memory_id"])["status"] == "active"
+
+
+def test_cold_memory_is_decay_pruned_safely(make_mem, clock):
+    """A genuinely cold memory (decayed below the floor, never reinforced) is
+    pruned by compaction, while a reinforced one survives — and the guardrail
+    does not roll back, because pruning the cold one doesn't hurt recall."""
+    m = make_mem(Config())
+    cold = m.remember("An old note nobody queries anymore.", subject="cold")
+    keep = m.remember("The database is Postgres.", subject="db")
+    clock.advance_days(120)                 # both decay well below the floor
+    m.recall("what database do we use")     # reinforce 'keep' back above the floor
     res = m.compact()
-    assert m.inspect(memory_id=noise["memory_id"])["status"] in ("quarantined", "deleted")
+    assert m.inspect(memory_id=cold["memory_id"])["status"] in ("quarantined", "deleted")
     assert m.inspect(memory_id=keep["memory_id"])["status"] == "active"
     assert res["guardrail"]["rolled_back"] is False  # pruning noise didn't hurt real recall
 

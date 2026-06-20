@@ -125,6 +125,26 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "record_feedback",
+        "description": (
+            "Close the loop on recalled memories: mark them 'useful' (it helped — "
+            "reinforces, and reverses one prior harmful mark) or 'harmful' (it "
+            "misled — down-weights; repeated harm also flags it for review). This "
+            "is the only signal that proves a memory actually helped, so the store "
+            "gets more relevant with use. Pass the memory_ids you acted on."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_ids": {"type": "array", "items": {"type": "string"},
+                               "description": "Memory ids (from recall) to score."},
+                "signal": {"type": "string", "enum": ["useful", "harmful"],
+                           "description": "Outcome of using those memories."},
+            },
+            "required": ["memory_ids", "signal"],
+        },
+    },
+    {
         "name": "self_tune",
         "description": (
             "Self-tune the memory policy: replay this store's data under candidate "
@@ -142,14 +162,23 @@ TOOLS: list[dict[str, Any]] = [
 # Lean default surface: only what the *model* should call lives in the tool list
 # (every tool schema is a standing per-request token tax). Discipline tools
 # (compact/forget/restore/inspect/diet_report/self_tune) run via hooks/CLI, not
-# the model — expose them only with LEPTIN_MCP_TOOLS=all.
+# the model. `record_feedback` is opt-in: it's model-facing but off by default to
+# keep the surface to two — enable it (and the rest) via LEPTIN_MCP_TOOLS.
 LEAN_TOOLS = {"remember", "recall"}
 
 
 def visible_tools() -> list[dict[str, Any]]:
-    if os.environ.get("LEPTIN_MCP_TOOLS", "lean").lower() == "all":
+    """Resolve the advertised tool surface from ``LEPTIN_MCP_TOOLS``:
+    unset/``lean`` → the two model tools; ``all`` → everything; or an explicit
+    comma list (e.g. ``remember,recall,record_feedback``) for fine control."""
+    spec = os.environ.get("LEPTIN_MCP_TOOLS", "lean").strip().lower()
+    if spec == "all":
         return TOOLS
-    return [t for t in TOOLS if t["name"] in LEAN_TOOLS]
+    if spec in ("", "lean"):
+        names = LEAN_TOOLS
+    else:
+        names = {n.strip() for n in spec.split(",") if n.strip()}
+    return [t for t in TOOLS if t["name"] in names]
 
 
 class MCPServer:
@@ -169,6 +198,8 @@ class MCPServer:
             "restore": lambda a: mem.restore(a.get("memory_id", "")),
             "inspect": lambda a: mem.inspect(a.get("memory_id"), a.get("query")),
             "diet_report": lambda a: mem.diet_report(a.get("window", "session")),
+            "record_feedback": lambda a: mem.record_feedback(
+                a.get("memory_ids", []), a.get("signal", "useful")),
             "self_tune": lambda a: mem.tune(bool(a.get("dry_run", False))),
         }
 

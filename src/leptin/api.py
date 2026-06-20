@@ -104,6 +104,19 @@ class Leptin:
     def health(self) -> dict[str, Any]:
         return self.engine.health()
 
+    def conflicts(self) -> list[dict[str, Any]]:
+        """Same-subject memories flagged as possible (unresolved) contradictions."""
+        return self.engine.conflicts()
+
+    def superseded(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Recently superseded memories + what replaced them and why (review surface)."""
+        return self.engine.superseded(limit)
+
+    def reembed(self) -> dict[str, Any]:
+        """Re-embed active memories with the current embedder (recover from a past
+        hosted→local downgrade)."""
+        return self.engine.reembed()
+
     def compact(self, dry_run: bool = False) -> dict[str, Any]:
         return self.engine.compact(dry_run=dry_run)
 

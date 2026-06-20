@@ -12,6 +12,7 @@ import json
 import sqlite3
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Callable, Iterable, Optional
 
 SCHEMA = """
@@ -33,10 +34,14 @@ CREATE TABLE IF NOT EXISTS memories (
     mtype           TEXT NOT NULL DEFAULT 'fact',  -- fact|procedural|task|lesson
     source_ref      TEXT,                          -- anchor: linear:ABC-123, spec:foo.md#sec, commit:sha
     stale           INTEGER NOT NULL DEFAULT 0,    -- 1 when its source_ref changed
-    inject_count    INTEGER NOT NULL DEFAULT 0,    -- times injected by recall (usefulness loop)
-    useful_count    INTEGER NOT NULL DEFAULT 0,    -- needed again in a later session / marked useful
+    inject_count    INTEGER NOT NULL DEFAULT 0,    -- times injected (usefulness loop)
+    useful_count    INTEGER NOT NULL DEFAULT 0,    -- EXPLICIT 'useful' feedback only (helped)
     harmful_count   INTEGER NOT NULL DEFAULT 0,    -- marked harmful (down-weighted)
-    last_inject_session TEXT                        -- session of the last injection
+    last_inject_session TEXT,                       -- session of the last injection
+    last_inject_at  REAL,                           -- ts of the last injection (recency-gated recurrence)
+    recur_sessions  INTEGER NOT NULL DEFAULT 0,     -- distinct later sessions it recurred in (weak signal)
+    embedder        TEXT,                           -- provenance of the stored vector, e.g. 'local-hash:256'
+    conflicts_with  TEXT                            -- id of a same-subject memory it may contradict (flag-for-review)
 );
 CREATE INDEX IF NOT EXISTS idx_mem_status  ON memories(status);
 CREATE INDEX IF NOT EXISTS idx_mem_subject ON memories(subject);
@@ -130,7 +135,8 @@ def _new_id() -> str:
 
 
 # --- schema migrations -------------------------------------------------------
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+_EMB_CACHE_MAX = 4096  # bound the parsed-vector cache so the long-lived process can't grow without limit
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -171,7 +177,21 @@ def _migration_4(conn: sqlite3.Connection) -> None:
     _add_column(conn, "memories", "last_inject_session", "TEXT")
 
 
-_MIGRATIONS = {1: _migration_1, 2: _migration_2, 3: _migration_3, 4: _migration_4}
+def _migration_5(conn: sqlite3.Connection) -> None:
+    """v1.3: separate recurrence from usefulness + embedder provenance.
+
+    ``useful_count`` now means EXPLICIT 'useful' feedback only; cross-session
+    recurrence accrues in the new ``recur_sessions`` (a weak ranking signal, not
+    a prune/protect veto). ``embedder`` records which model produced a row's
+    vector so a hosted→local downgrade is detectable, not silent."""
+    _add_column(conn, "memories", "last_inject_at", "REAL")
+    _add_column(conn, "memories", "recur_sessions", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "memories", "embedder", "TEXT")
+    _add_column(conn, "memories", "conflicts_with", "TEXT")
+
+
+_MIGRATIONS = {1: _migration_1, 2: _migration_2, 3: _migration_3,
+               4: _migration_4, 5: _migration_5}
 
 
 class Store:
@@ -181,8 +201,9 @@ class Store:
         self.path = path
         self._clock = clock or time.time
         # Parsed-embedding cache (id -> list[float]) so recall over a large store
-        # doesn't re-parse every memory's JSON vector on every call.
-        self._emb_cache: dict[str, list[float]] = {}
+        # doesn't re-parse every memory's JSON vector on every call. LRU-bounded
+        # so the long-lived MCP-server process can't grow without limit.
+        self._emb_cache: "OrderedDict[str, list[float]]" = OrderedDict()
         # check_same_thread=False so the MCP server (single-threaded loop) and
         # the HTTP dashboard can share a connection safely under the GIL.
         self.conn = sqlite3.connect(path, check_same_thread=False)
@@ -192,9 +213,10 @@ class Store:
         self.conn.isolation_level = None
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        # Concurrency: wait up to 5s for a lock instead of erroring immediately,
-        # so multiple processes (e.g. MCP server + dashboard + CLI) coexist.
-        self.conn.execute("PRAGMA busy_timeout=5000")
+        # Concurrency: wait up to 30s for a lock instead of erroring immediately,
+        # so multiple processes (MCP server + dashboard + CLI + hooks) coexist
+        # even when a guardrailed compaction holds a brief write transaction.
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.executescript(SCHEMA)
         self._migrate()
 
@@ -245,6 +267,7 @@ class Store:
         memory_id: Optional[str] = None,
         mtype: str = "fact",
         source_ref: Optional[str] = None,
+        embedder: Optional[str] = None,
     ) -> dict[str, Any]:
         mid = memory_id or _new_id()
         now = self.now()
@@ -252,15 +275,22 @@ class Store:
             """INSERT INTO memories
                (id, subject, content, embedding, tokens, strength, created_at,
                 last_accessed_at, access_count, status, source_session, provenance,
-                mtype, source_ref)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                mtype, source_ref, embedder)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 mid, subject, content, json.dumps(embedding), tokens, strength,
                 now, now, 0, "active", source_session, provenance, mtype, source_ref,
+                embedder,
             ),
         )
-        self._emb_cache[mid] = list(embedding)  # seed the cache
+        self._cache_emb(mid, list(embedding))  # seed the cache
         return self.get_memory(mid)  # type: ignore[return-value]
+
+    def _cache_emb(self, mid: str, vec: list[float]) -> None:
+        self._emb_cache[mid] = vec
+        self._emb_cache.move_to_end(mid)
+        while len(self._emb_cache) > _EMB_CACHE_MAX:
+            self._emb_cache.popitem(last=False)  # evict least-recently-used
 
     def flag_stale(self, source_ref: str) -> list[str]:
         """Mark every active memory anchored to source_ref as stale; return ids."""
@@ -281,6 +311,7 @@ class Store:
         mid = d["id"]
         cached = self._emb_cache.get(mid)
         if cached is not None:
+            self._emb_cache.move_to_end(mid)  # LRU touch
             d["embedding"] = cached
         else:
             emb: list[float] = []
@@ -290,7 +321,7 @@ class Store:
                 except (TypeError, json.JSONDecodeError):
                     emb = []
             d["embedding"] = emb
-            self._emb_cache[mid] = emb
+            self._cache_emb(mid, emb)
         return d
 
     def get_memory(self, memory_id: str) -> Optional[dict[str, Any]]:
@@ -332,6 +363,25 @@ class Store:
             q += " WHERE " + " AND ".join(clauses)
         q += " ORDER BY created_at"
         return [self._parse_row(r) for r in self.conn.execute(q, args).fetchall()]
+
+    def list_active_in_subject(self, subject: Optional[str]) -> list[dict[str, Any]]:
+        """Active memories with exactly this subject (NULL-safe: ``subject IS ?``
+        matches None against None too). Scopes write-time dedup to O(subject)
+        instead of scanning the whole active set."""
+        rows = self.conn.execute(
+            "SELECT * FROM memories WHERE status='active' AND subject IS ? ORDER BY created_at",
+            (subject,),
+        ).fetchall()
+        return [self._parse_row(r) for r in rows]
+
+    def list_superseded(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Superseded memories (newest first) — the discoverable review surface for
+        write-time truth-replacement, so a supersede is never an invisible drop."""
+        rows = self.conn.execute(
+            "SELECT * FROM memories WHERE status='superseded' ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._parse_row(r) for r in rows]
 
     def count_memories(self, status: Optional[str] = "active") -> int:
         if status is None:

@@ -61,26 +61,21 @@ class Guardrail:
 
     # ------------------------------------------------------------- probe set
     def derive_probes(self, now: float) -> list[dict[str, Any]]:
-        """Auto-probes guard *important* memories: above-floor AND not proven
-        disposable. "Important" means useful, not merely injected a lot — so a
-        memory that's recalled-but-never-useful ("noise"), stale, or marked
-        harmful is NOT auto-probed (it's exactly what compaction may prune). A
-        user who cares about a specific one adds an explicit probe, always honoured.
+        """Auto-probes guard the *current truth worth keeping*: above the strength
+        floor (a cold/decayed memory is a prune target, not something to protect),
+        not stale, and not over the harmful threshold. A memory that recurs but was
+        never explicitly useful is no longer carved out — it's protected like any
+        other live memory, so a prune can't quietly drop it with an empty probe set.
+        A user who cares about a specific fact adds an explicit probe, always honoured.
         """
-        from leptin.engine import _NOISE_INJECTS  # lazy: avoids an import cycle
-
         cfg = self.engine.config
         actives = self.engine.store.list_memories(status="active")
+        thr = cfg.harmful_stale_threshold
 
         def important(m: dict[str, Any]) -> bool:
             if self.engine.effective_strength(m, now) < cfg.strength_floor:
                 return False
-            if m.get("stale") or int(m.get("harmful_count", 0) or 0) > 0:
-                return False
-            # injected a lot but never proved useful → don't protect it
-            if (m.get("mtype") != "lesson"
-                    and int(m.get("inject_count", 0) or 0) >= _NOISE_INJECTS
-                    and int(m.get("useful_count", 0) or 0) == 0):
+            if m.get("stale") or int(m.get("harmful_count", 0) or 0) >= thr:
                 return False
             return True
 
@@ -131,15 +126,40 @@ class Guardrail:
         for p in probes:
             injected = self.engine._recall_preview(p["question"], now)
             inj_ids = {m["id"] for m in injected}
+            id_to_mem = {m["id"]: m for m in injected}
             src = p.get("source_memory_id") or self._resolve_source(p, now)
             if src:
                 live = self.engine._live_id(src)
-                covered = live is not None and live in inj_ids
+                if live is None or live not in inj_ids:
+                    covered = False
+                elif live == src:
+                    # Not superseded: the memory must be injected AND still CONTAIN
+                    # the fact — so a merge/edit that kept the id but dropped the
+                    # value is caught (the id-only check scored it 1.0 by mistake).
+                    lm = id_to_mem.get(live)
+                    covered = bool(lm and covers(lm["content"], p["expected_fact"]))
+                else:
+                    # The source was intentionally superseded → its successor
+                    # carrying the chain being injected is the correct success
+                    # signal (don't demand the new truth restate the old fact).
+                    covered = True
             else:
                 covered = self._covered_unlinked(p, injected, now)
             if covered:
                 hits += 1
         return hits / len(probes)
+
+    def _probe_confidence(self, probes: list[dict[str, Any]]) -> dict[str, Any]:
+        """How much to trust this guardrail run. ``verbatim_probe_fraction`` is the
+        share of probes whose question already contains the answer (weak, derived
+        verbatim from content); ``low_confidence`` flags a lexical (offline)
+        embedder, whose recall resolution is keyword-level, not semantic."""
+        if not probes:
+            return {"verbatim_probe_fraction": 0.0, "low_confidence": self.engine._offline}
+        verbatim = sum(1 for p in probes
+                       if p["expected_fact"].strip().lower() in p["question"].strip().lower())
+        return {"verbatim_probe_fraction": round(verbatim / len(probes), 3),
+                "low_confidence": self.engine._offline}
 
     def _resolve_source(self, p: dict[str, Any], now: float) -> Optional[str]:
         """Lazily link an unlinked probe to a live memory it's actually about —
@@ -184,6 +204,7 @@ class Guardrail:
         purged = 0 if dry_run else engine.purge_expired(now)
 
         probes = self.build_probe_set(now)
+        confidence = self._probe_confidence(probes)
         recall_before = self.measure(probes, now)
         plan = engine.plan_compaction(now)
         n_decay = len(plan["decayed"])
@@ -221,6 +242,7 @@ class Guardrail:
                 merged=0, superseded=0, decayed=0, projected=0,
                 recall_before=recall_before, recall_after=recall_before,
                 passed=True, rolled_back=False, dry_run=dry_run, diff=[], purged=purged,
+                confidence=confidence,
             )
 
         store.begin()
@@ -261,12 +283,21 @@ class Guardrail:
             projected=projected_freed,
             recall_before=recall_before, recall_after=recall_after,
             passed=passed, rolled_back=rolled_back, dry_run=dry_run, diff=diff,
-            tokens_saved=tokens_saved, purged=purged,
+            tokens_saved=tokens_saved, purged=purged, confidence=confidence,
         )
 
     def _report(self, *, merged, superseded, decayed, projected, recall_before,
                 recall_after, passed, rolled_back, dry_run, diff, tokens_saved=0,
-                purged=0):
+                purged=0, confidence=None):
+        guardrail = {
+            "recall_before": round(recall_before, 4),
+            "recall_after": round(recall_after, 4),
+            "passed": passed,
+            "rolled_back": rolled_back,
+            "max_drop": self.engine.config.guardrail_max_drop,
+        }
+        if confidence:
+            guardrail.update(confidence)  # verbatim_probe_fraction + low_confidence
         return {
             "merged": merged,
             "superseded": superseded,
@@ -275,13 +306,7 @@ class Guardrail:
             "projected_tokens_saved": projected,
             "tokens_saved": tokens_saved,
             "dry_run": dry_run,
-            "guardrail": {
-                "recall_before": round(recall_before, 4),
-                "recall_after": round(recall_after, 4),
-                "passed": passed,
-                "rolled_back": rolled_back,
-                "max_drop": self.engine.config.guardrail_max_drop,
-            },
+            "guardrail": guardrail,
             "diff": diff,
         }
 

@@ -22,7 +22,7 @@ from typing import Any, Optional
 from leptin.config import Config
 from leptin.embeddings import Embedder, LocalHashingEmbedder, cosine, make_embedder
 from leptin.guardrail import Guardrail, covers
-from leptin.llm import HeuristicMerger, Merger, detect_contradiction, make_merger
+from leptin.llm import HeuristicMerger, Merger, contradiction_signal, detect_contradiction, make_merger
 from leptin.logconf import get_logger, warn_once as _warn_once
 from leptin.storage import Store
 from leptin.tokenizer import count_memory_tokens, count_tokens
@@ -32,18 +32,13 @@ _WORD = re.compile(r"[a-z0-9']+")
 MAX_CONTENT_CHARS = 20_000  # guard against pathological inputs
 _log = get_logger("engine")
 
-# Memory types and how fast each decays, as a multiple of decay_half_life_days.
-# None = never decays. Lessons must persist; task notes fade with the task.
+# Memory types. How fast each decays (as a multiple of decay_half_life_days) and
+# the noise/penalty knobs all live in Config now (see config.py) so they're
+# inspectable, overridable, and locked against the self-tuner. ``lesson`` never
+# decays — except an un-graduated AUTO-captured candidate lesson, which decays on
+# ``candidate_lesson_half_life_days`` so a noisy auto-corpus self-prunes.
 MEMORY_TYPES = ("fact", "procedural", "task", "lesson")
-_TYPE_HALFLIFE_MULT: dict[str, Optional[float]] = {
-    "fact": 1.0,        # facts/conventions — normal decay
-    "procedural": 2.0,  # how-to/workflows — slow decay
-    "task": 0.4,        # tied to a ticket — fades faster
-    "lesson": None,     # lessons-learned / anti-patterns — never decay
-}
-_STALE_PENALTY = 0.25   # down-weight (don't hide) memories whose source changed
-_HARMFUL_PENALTY = 0.4  # strength multiplier per 'harmful' feedback mark
-_NOISE_INJECTS = 5      # injected this many times with 0 usefulness → it's padding
+_AUTO_LESSON_SOURCE = "auto-captured"
 
 
 class DietEngine:
@@ -74,6 +69,12 @@ class DietEngine:
         self._retry_backoff = 0.05        # base seconds; exponential
         self._embed_cache: dict[str, list[float]] = {}  # text → vector (avoid re-billing)
         self._embed_cache_max = 2048
+        # A hosted outage now degrades to local for the failing call + a cooldown,
+        # then retries hosted — instead of permanently pinning the store to local.
+        self._hosted_cooldown_s = 300.0
+        self._hosted_cooldown_until = 0.0
+        self._fallback_local: Optional[LocalHashingEmbedder] = None
+        self._last_local = self._offline  # did the most recent embed use local?
 
     # ------------------------------------------------------------------ utils
     def _tok(self, text: str) -> int:
@@ -95,6 +96,7 @@ class DietEngine:
             return cached
 
         if self._offline:
+            self._last_local = True
             try:
                 vec = self.embedder.embed(text)
             except Exception:
@@ -102,10 +104,16 @@ class DietEngine:
             self._cache_embed(text, vec)
             return vec
 
+        # In a post-failure cooldown → use local for now, retry hosted later.
+        now = self.store.now()
+        if self._hosted_cooldown_until and now < self._hosted_cooldown_until:
+            return self._embed_local(text)
+
         last_exc: Optional[Exception] = None
         for attempt in range(self._hosted_retries + 1):
             try:
                 vec = self.embedder.embed(text)
+                self._last_local = False
                 self._cache_embed(text, vec)
                 return vec
             except Exception as exc:  # noqa: BLE001
@@ -113,21 +121,41 @@ class DietEngine:
                 if attempt < self._hosted_retries:
                     time.sleep(self._retry_backoff * (2 ** attempt))
 
-        # All retries failed → downgrade to local, persistently.
+        # A missing SDK won't recover without an install → pin to local permanently.
+        # A transient outage (timeout / 429 / connection) → local for THIS call +
+        # a cooldown, then retry hosted: one blip shouldn't durably degrade a
+        # semantic store to lexical.
+        if isinstance(last_exc, (ImportError, ModuleNotFoundError)):
+            _warn_once(
+                "embed-downgrade",
+                f"embedding SDK for '{self.config.embedding_model}' is not installed "
+                f"({type(last_exc).__name__}); using local-hash embeddings. "
+                f"`pip install leptin-hlp[hosted]` then `leptin reembed` to recover.",
+            )
+            self.embedder = LocalHashingEmbedder(self.config.embedding_dim)
+            self._offline = True
+            self._tok_model = "heuristic"
+            self._embed_cache.clear()
+            return self._embed_local(text)
         _warn_once(
             "embed-downgrade",
             f"embedding model '{self.config.embedding_model}' unavailable "
             f"({type(last_exc).__name__ if last_exc else 'error'}) after "
-            f"{self._hosted_retries + 1} attempts; falling back to local-hash embeddings.",
+            f"{self._hosted_retries + 1} attempts; using local-hash for now and "
+            f"retrying hosted after {int(self._hosted_cooldown_s)}s. "
+            f"Run `leptin reembed` once it recovers to re-vectorise.",
         )
-        self.embedder = LocalHashingEmbedder(self.config.embedding_dim)
-        self._offline = True
-        self._tok_model = "heuristic"
-        self._embed_cache.clear()  # local vectors aren't comparable to hosted ones
+        self._hosted_cooldown_until = now + self._hosted_cooldown_s
+        return self._embed_local(text)
+
+    def _embed_local(self, text: str) -> list[float]:
+        """Embed with the local hashing embedder (the hosted-outage fallback).
+        Not written into the hosted cache (incomparable dims)."""
+        if self._fallback_local is None:
+            self._fallback_local = LocalHashingEmbedder(self.config.embedding_dim)
+        self._last_local = True
         try:
-            vec = self.embedder.embed(text)
-            self._cache_embed(text, vec)
-            return vec
+            return self._fallback_local.embed(text)
         except Exception:
             return []
 
@@ -136,12 +164,33 @@ class DietEngine:
             self._embed_cache.pop(next(iter(self._embed_cache)), None)  # FIFO evict
         self._embed_cache[text] = vec
 
+    def reembed(self) -> dict[str, Any]:
+        """Re-embed all active memories with the CURRENT embedder — recovery from a
+        past hosted→local downgrade once the hosted model is back. Transactional;
+        clears the cooldown so the next call tries hosted again."""
+        self._hosted_cooldown_until = 0.0
+        self._embed_cache.clear()
+        actives = self.store.list_memories(status="active")
+        self.store.begin()
+        n = 0
+        tag = self._embedder_tag([])
+        try:
+            for m in actives:
+                vec = self._embed(m["content"])
+                tag = self._embedder_tag(vec)
+                self.store.update_memory(m["id"], embedding=vec, embedder=tag)
+                n += 1
+            self.store.commit()
+        except Exception:
+            self.store.rollback()
+            raise
+        return {"reembedded": n, "embedder": tag}
+
     def _settle_embedder(self) -> None:
-        """Force any pending hosted→local fallback to happen now, so a sequence of
-        measurements (e.g. recall_before/after in a compaction) all use the same
-        embedder and stay comparable."""
+        """Warm the embedder so a sequence of measurements (e.g. recall_before/
+        after in a compaction) all use the same one and stay comparable."""
         if not self._offline:
-            self._embed("warmup")  # triggers the fallback in _embed on failure
+            self._embed("warmup")  # triggers cooldown fallback in _embed on failure
 
     def _safe_decide(self, older: str, newer: str, sim: float):
         """Merge/supersede decision with graceful degradation — never raises.
@@ -170,25 +219,55 @@ class DietEngine:
         self._merger_offline = True
         return self.merger.decide(older, newer, sim)
 
+    def _embedder_tag(self, emb: Optional[list[float]] = None) -> str:
+        """Provenance of a vector this engine wrote, e.g. ``local-hash:256`` or
+        ``text-embedding-3-small:1536`` — so a hosted→local downgrade is detectable
+        per-row rather than silently mixing incomparable vectors. Reflects whether
+        the most recent embed actually used local (cooldown fallback) and the
+        vector's true dimensionality."""
+        local = self._offline or self._last_local
+        name = "local-hash" if local else self.config.embedding_model
+        dim = len(emb) if emb else self.config.embedding_dim
+        return f"{name}:{dim}"
+
     def _decay_factor(self, last_accessed: float, now: float, half: float) -> float:
         if half <= 0:
             return 1.0
         days = max(0.0, (now - last_accessed) / 86400.0)
         return math.exp(-(math.log(2) / half) * days)
 
+    def _halflife_mult(self, mtype: str) -> float:
+        if mtype == "procedural":
+            return self.config.procedural_halflife_mult
+        if mtype == "task":
+            return self.config.task_halflife_mult
+        return 1.0  # fact
+
+    def _is_candidate_lesson(self, mem: dict[str, Any]) -> bool:
+        """An auto-captured lesson that hasn't yet *graduated* (recurred across a
+        session or earned explicit 'useful' feedback). Hand-authored lessons are
+        never candidates; graduated ones become permanent."""
+        return (mem.get("mtype") == "lesson"
+                and mem.get("provenance") == _AUTO_LESSON_SOURCE
+                and int(mem.get("useful_count", 0) or 0) == 0
+                and int(mem.get("recur_sessions", 0) or 0) == 0)
+
     def effective_strength(self, mem: dict[str, Any], now: Optional[float] = None) -> float:
         now = self.store.now() if now is None else now
         # Outcome feedback: memories marked harmful are down-weighted (a wrong
         # memory that misled the agent should fade from recall).
-        penalty = _HARMFUL_PENALTY ** int(mem.get("harmful_count", 0) or 0)
-        mult = _TYPE_HALFLIFE_MULT.get(mem.get("mtype", "fact"), 1.0)
-        if mult is None:
-            # Lessons-learned / anti-patterns never decay — they must stay
-            # available so the agent stops repeating known mistakes.
-            return float(mem["strength"]) * penalty
-        half = self.config.decay_half_life_days * mult
-        decay = self._decay_factor(mem["last_accessed_at"], now, half)
-        return float(mem["strength"]) * decay * penalty
+        penalty = self.config.harmful_penalty ** int(mem.get("harmful_count", 0) or 0)
+        base = float(mem["strength"])
+        if mem.get("mtype") == "lesson":
+            # Hand-authored / graduated lessons never decay — they must stay
+            # available so the agent stops repeating known mistakes. An
+            # un-graduated auto-captured candidate decays so noise self-prunes.
+            half = self.config.candidate_lesson_half_life_days
+            if self._is_candidate_lesson(mem) and half > 0:
+                return base * self._decay_factor(mem["last_accessed_at"], now, half) * penalty
+            return base * penalty
+        half = self.config.decay_half_life_days * self._halflife_mult(mem.get("mtype", "fact"))
+        return base * self._decay_factor(mem["last_accessed_at"], now, half) * penalty
 
     def _keyword_sim(self, a: str, b: str) -> float:
         wa = set(_WORD.findall(a.lower()))
@@ -204,22 +283,51 @@ class DietEngine:
         # Degraded path: keyword overlap (recency/keyword recall).
         return self._keyword_sim(query_text, mem["content"])
 
-    def _rank(self, query: str, now: Optional[float] = None) -> list[dict[str, Any]]:
-        """Score all active memories for a query. Pure / read-only."""
+    def _rank(self, query: str, now: Optional[float] = None,
+              actives: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
+        """Score active memories for a query. Pure / read-only.
+
+        ``actives`` lets a caller (e.g. the guardrail measuring many probes) pass
+        one snapshot so the active set isn't re-listed per call. With
+        ``rank_candidate_limit > 0``, a cheap keyword prefilter trims the set
+        before the full cosine scan — a scale guard for large stores."""
         now = self.store.now() if now is None else now
         qemb = self._embed(query)
+        rows = self.store.list_memories(status="active") if actives is None else actives
+        rows = self._prefilter(query, rows)
         out = []
-        for m in self.store.list_memories(status="active"):
+        for m in rows:
             sim = self._similarity(query, qemb, m)
             strength = self.effective_strength(m, now)
             score = sim * strength
             if m.get("stale"):
-                score *= _STALE_PENALTY  # source changed — down-weight, don't hide
+                score *= self.config.stale_penalty  # source changed — down-weight, don't hide
             out.append(
                 {"score": score, "sim": sim, "strength": strength, "memory": m}
             )
-        out.sort(key=lambda r: (r["score"], r["sim"]), reverse=True)
+        # Recurrence is a *weak* tiebreaker only (a memory needed again across
+        # sessions ranks above an equally-scored one that wasn't) — never a
+        # primary signal, so it can't promote noise.
+        out.sort(key=lambda r: (r["score"], r["sim"],
+                                int(r["memory"].get("recur_sessions", 0) or 0)),
+                 reverse=True)
         return out
+
+    def _prefilter(self, query: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Optional O(n) keyword prefilter to cap the cosine scan at scale. Exact
+        by default (limit 0). When trimming, keeps the rows with the most query-word
+        overlap (ties keep insertion order) so on-topic memories aren't dropped."""
+        limit = self.config.rank_candidate_limit
+        if not limit or len(rows) <= limit:
+            return rows
+        qwords = set(_WORD.findall(query.lower()))
+        if not qwords:
+            return rows[:limit]
+        scored = sorted(
+            rows, key=lambda m: len(qwords & set(_WORD.findall(m["content"].lower()))),
+            reverse=True,
+        )
+        return scored[:limit]
 
     def _reinforce(self, mem: dict[str, Any], now: float) -> None:
         eff = self.effective_strength(mem, now)
@@ -231,43 +339,89 @@ class DietEngine:
             access_count=mem["access_count"] + 1,
         )
 
-    def _track_injection(self, mem: dict[str, Any]) -> None:
-        """Usefulness loop: count injections; if a memory is needed again in a
-        *different, later* session, that recurrence is real evidence it's useful."""
-        fields: dict[str, Any] = {"inject_count": int(mem.get("inject_count", 0)) + 1,
-                                  "last_inject_session": self.session_id}
-        last = mem.get("last_inject_session")
-        if last and last != self.session_id:
-            fields["useful_count"] = int(mem.get("useful_count", 0)) + 1
+    def _track_injection(self, mem: dict[str, Any], now: float) -> None:
+        """Observe an injection (recall OR session-start push).
+
+        Counts the injection and records *recurrence* — needed again in a later
+        session, or again after a cooldown gap — as ``recur_sessions``. Recurrence
+        is a WEAK ranking signal, deliberately NOT ``useful_count``: a note that
+        merely keeps matching a recurring query isn't proven helpful, so it must
+        not become un-prunable or guardrail-protected on recurrence alone.
+        ``useful_count`` is reserved for explicit 'useful' feedback (it helped)."""
+        last_session = mem.get("last_inject_session")
+        last_at = mem.get("last_inject_at")
+        fields: dict[str, Any] = {
+            "inject_count": int(mem.get("inject_count", 0) or 0) + 1,
+            "last_inject_session": self.session_id,
+            "last_inject_at": now,
+        }
+        recurred = bool(last_session and last_session != self.session_id)
+        if not recurred and last_at and (now - float(last_at)) >= self.config.recur_cooldown_seconds:
+            recurred = True  # needed again after a gap, even within one long session
+        if recurred:
+            fields["recur_sessions"] = int(mem.get("recur_sessions", 0) or 0) + 1
         self.store.update_memory(mem["id"], **fields)
 
     def record_feedback(self, memory_ids: list[str], signal: str) -> dict[str, Any]:
         """Close the loop with an explicit outcome signal on recalled memories.
 
-        ``useful`` reinforces; ``harmful`` down-weights (and flags for review) —
-        a wrong memory that misled the agent shouldn't keep being recalled."""
+        ``useful`` reinforces and *reverses* one prior 'harmful' mark (so a noisy
+        downvote is recoverable). ``harmful`` down-weights immediately, but only
+        flags the memory stale + drops it from the guardrail's protected set once
+        it crosses ``harmful_stale_threshold`` — a single noisy/adversarial signal
+        shouldn't both cripple recall and blind the safety net."""
         now = self.store.now()
         touched = []
+        thr = self.config.harmful_stale_threshold
         for mid in memory_ids:
             m = self.store.get_memory(mid)
             if not m:
                 continue
             if signal == "useful":
-                self.store.update_memory(mid, useful_count=int(m.get("useful_count", 0)) + 1)
-                self._reinforce(m, now)
+                updates: dict[str, Any] = {"useful_count": int(m.get("useful_count", 0) or 0) + 1}
+                h = int(m.get("harmful_count", 0) or 0)
+                if h > 0:
+                    updates["harmful_count"] = h - 1  # a 'useful' reverses a prior harmful mark
+                    if h - 1 < thr:
+                        updates["stale"] = 0  # lift the harmful-induced stale flag
+                self.store.update_memory(mid, **updates)
+                self._reinforce(self.store.get_memory(mid), now)
                 self.store.add_event(mid, "recall_inject", reason="feedback: useful")
             elif signal == "harmful":
-                self.store.update_memory(mid, harmful_count=int(m.get("harmful_count", 0)) + 1,
-                                         stale=1)
-                self.store.add_event(mid, "decay", reason="feedback: harmful")
+                h = int(m.get("harmful_count", 0) or 0) + 1
+                updates = {"harmful_count": h}
+                if h >= thr:
+                    updates["stale"] = 1  # repeated harm → surface for review too
+                self.store.update_memory(mid, **updates)
+                self.store.add_event(mid, "decay", reason=f"feedback: harmful (x{h})")
             touched.append(mid)
         return {"signal": signal, "updated": touched, "count": len(touched)}
 
     def capture_lesson(self, content: str, subject: str = "anti-pattern") -> dict[str, Any]:
-        """Auto-capture an anti-pattern as a never-decaying, re-injected lesson —
-        the mistake→lesson→prevent loop, closed automatically from a failure."""
-        return self.remember(content, subject=subject, source="auto-captured",
-                             mtype="lesson")
+        """Auto-capture an anti-pattern as a *candidate* lesson — re-injected, but
+        decaying (see :meth:`_is_candidate_lesson`) until it graduates by recurring
+        or earning explicit 'useful' feedback. The mistake→lesson→prevent loop,
+        closed automatically from a failure, without an unbounded permanent corpus."""
+        result = self.remember(content, subject=subject, source=_AUTO_LESSON_SOURCE,
+                               mtype="lesson")
+        self._cap_auto_lessons()
+        return result
+
+    def _cap_auto_lessons(self) -> None:
+        """Keep the auto-captured candidate corpus bounded: past ``max_auto_lessons``,
+        quarantine (reversibly) the weakest un-graduated candidates. Hand-authored
+        and graduated lessons are exempt."""
+        now = self.store.now()
+        cands = [m for m in self.store.list_memories(status="active")
+                 if self._is_candidate_lesson(m)]
+        if len(cands) <= self.config.max_auto_lessons:
+            return
+        cands.sort(key=lambda m: self.effective_strength(m, now))  # weakest first
+        until = now + self.config.reversible_window_days * 86400.0
+        for m in cands[: len(cands) - self.config.max_auto_lessons]:
+            self.store.update_memory(m["id"], status="quarantined", reversible_until=until)
+            self.store.add_event(m["id"], "decay",
+                                 reason="auto-lesson cap: weakest candidate retired (reversible)")
 
     def _log_recall(
         self, baseline: int, actual: int, detail: Optional[dict[str, Any]] = None
@@ -324,17 +478,18 @@ class DietEngine:
         emb = self._embed(content)
 
         # Dedup/supersede only against same subject AND same type, so a lesson
-        # never merges into a fact (typing partitions the belief space).
+        # never merges into a fact (typing partitions the belief space). Scoped to
+        # the subject in SQL (NULL-safe) so ingestion is O(subject), not O(store).
         scored: list[tuple[float, dict[str, Any]]] = []
         if emb:
-            for m in self.store.list_memories(status="active"):
-                if m.get("subject") != subject or m.get("mtype", "fact") != mtype:
+            for m in self.store.list_active_in_subject(subject):
+                if m.get("mtype", "fact") != mtype:
                     continue
                 scored.append((self._similarity(content, emb, m), m))
             scored.sort(key=lambda x: x[0], reverse=True)
         best_sim, best = (scored[0] if scored else (0.0, None))
 
-        # 1) Near-duplicate (sim ≥ τ): merge, or supersede on contradiction.
+        # 1) Near-duplicate (sim ≥ τ): merge, or supersede on a CERTAIN contradiction.
         if best is not None and best_sim >= self.config.dedup_threshold:
             decision = self._safe_decide(best["content"], content, best_sim)
             if decision.action == "supersede":
@@ -343,24 +498,49 @@ class DietEngine:
                                        subject, source, decision.reason, mtype, source_ref)
             return self._merge(best, content, emb, new_tokens, decision.reason)
 
-        # 2) Lower-similarity contradiction (same subject, conflicting facts):
-        #    supersede every stale version, even if not lexically near-identical.
+        # 2) Lower-similarity CERTAIN contradiction (same subject, confidently
+        #    conflicting facts): supersede every stale version.
         stale = self._contradicting(scored, content)
         if stale:
             return self._supersede(stale, content, emb, new_tokens, subject, source,
                                    "newer fact contradicts existing memory", mtype, source_ref)
 
-        # 3) No duplicate → create.
+        # 3) No confident duplicate/contradiction → create. Then flag any
+        #    UNCERTAIN same-subject conflicts for review — keep both active, never
+        #    silently bury a true fact on a low-confidence signal.
         mem = self.store.add_memory(
             content=content, embedding=emb, tokens=new_tokens, subject=subject,
             source_session=self.session_id, provenance=source,
-            mtype=mtype, source_ref=source_ref,
+            mtype=mtype, source_ref=source_ref, embedder=self._embedder_tag(emb),
         )
         self.store.add_event(mem["id"], "create", reason=source or "new memory",
                              token_delta=new_tokens)
+        conflict_id = self._flag_conflicts(scored, content, mem)
         self._log_footprint("remember", reduced=0,
                             detail={"action": "created", "memory_id": mem["id"], "mtype": mtype})
-        return {"action": "created", "memory_id": mem["id"], "tokens_saved": 0, "mtype": mtype}
+        out = {"action": "created", "memory_id": mem["id"], "tokens_saved": 0, "mtype": mtype}
+        if conflict_id:
+            out["conflicts_with"] = conflict_id  # surfaced for review (both kept)
+        return out
+
+    def _flag_conflicts(self, scored: list[tuple[float, dict[str, Any]]],
+                        content: str, new_mem: dict[str, Any]) -> Optional[str]:
+        """Link a same-subject memory that *may* contradict ``content`` (uncertain
+        signal) for human review — non-destructive, both stay active."""
+        floor = self.config.contradiction_threshold
+        for sim, m in scored:
+            if sim < floor:
+                continue
+            sig = contradiction_signal(m["content"], content)
+            if sig.uncertain and not sig.certain:
+                self.store.update_memory(m["id"], conflicts_with=new_mem["id"])
+                self.store.update_memory(new_mem["id"], conflicts_with=m["id"])
+                self.store.add_event(m["id"], "conflict",
+                                     reason=f"possible conflict with newer memory — {sig.reason}")
+                self.store.add_event(new_mem["id"], "conflict",
+                                     reason=f"possible conflict with existing memory — {sig.reason}")
+                return m["id"]
+        return None
 
     def _merge(self, best, content, emb, new_tokens, reason) -> dict[str, Any]:
         now = self.store.now()
@@ -400,15 +580,20 @@ class DietEngine:
     def _supersede(self, olds, content, emb, new_tokens, subject, source, reason,
                    mtype: str = "fact", source_ref: Optional[str] = None) -> dict[str, Any]:
         now = self.store.now()
+        until = now + self.config.reversible_window_days * 86400.0
         mem = self.store.add_memory(
             content=content, embedding=emb, tokens=new_tokens, subject=subject,
             strength=1.0, source_session=self.session_id, provenance=source,
-            mtype=mtype, source_ref=source_ref,
+            mtype=mtype, source_ref=source_ref, embedder=self._embedder_tag(emb),
         )
         superseded_ids = []
         old_tokens = 0
         for o in olds:
-            self.store.update_memory(o["id"], status="superseded", superseded_by=mem["id"])
+            # Reversible window: a write-time supersede is intentional truth-
+            # replacement, but restorable (and discoverable via `list_superseded`)
+            # — never an irreversible silent drop.
+            self.store.update_memory(o["id"], status="superseded", superseded_by=mem["id"],
+                                     reversible_until=until, conflicts_with=None)
             self.store.add_event(o["id"], "supersede", reason=reason, token_delta=-o["tokens"])
             superseded_ids.append(o["id"])
             old_tokens += o["tokens"]
@@ -452,7 +637,7 @@ class DietEngine:
 
         for m in injected:
             self._reinforce(m, now)
-            self._track_injection(m)
+            self._track_injection(m, now)
             self.store.add_event(m["id"], "recall_inject", reason=f"query: {query[:60]}")
 
         saved = self._log_recall(
@@ -554,14 +739,17 @@ class DietEngine:
         actives = self.store.list_memories(status="active")
 
         def prune_eligible(m: dict[str, Any]) -> bool:
-            if m.get("mtype") == "lesson":   # lessons never prune
-                return False
-            # Decayed below the floor, OR "noise": injected many times yet never
-            # proved useful (the recall-usefulness loop's prune signal).
-            if self.effective_strength(m, now) < self.config.strength_floor:
-                return True
-            return (int(m.get("inject_count", 0)) >= _NOISE_INJECTS
-                    and int(m.get("useful_count", 0)) == 0)
+            below = self.effective_strength(m, now) < self.config.strength_floor
+            if m.get("mtype") == "lesson":
+                # Hand-authored / graduated lessons never prune; an un-graduated
+                # auto-captured candidate may, once it has decayed below the floor.
+                return below and self._is_candidate_lesson(m)
+            # Decay-gated only: a genuinely-used memory is reinforced and stays
+            # above the floor (so heavy in-session use is never mistaken for
+            # noise). "Noise" — injected a lot but never proved useful — simply
+            # isn't protected from this decay-prune (and the guardrail won't shield
+            # it), so it ages out without insta-quarantining a strong memory.
+            return below
 
         decay_ids = {m["id"] for m in actives if prune_eligible(m)}
         decayed = [m for m in actives if m["id"] in decay_ids]
@@ -622,9 +810,12 @@ class DietEngine:
         for keep, drop in plan.get("merges", []):
             fused = self._fuse(keep, drop["content"])
             fused_tokens = self._tok(fused)
+            femb = self._embed(fused)
             self.store.update_memory(keep["id"], content=fused,
-                                     embedding=self._embed(fused), tokens=fused_tokens)
-            self.store.update_memory(drop["id"], status="superseded", superseded_by=keep["id"])
+                                     embedding=femb, tokens=fused_tokens,
+                                     embedder=self._embedder_tag(femb))
+            self.store.update_memory(drop["id"], status="superseded", superseded_by=keep["id"],
+                                     reversible_until=until)
             self.store.add_event(keep["id"], "merge",
                                  reason="compaction consolidated a near-duplicate",
                                  token_delta=-drop["tokens"])
@@ -632,7 +823,8 @@ class DietEngine:
             freed += drop["tokens"]
 
         for newer, older in plan.get("supersedes", []):
-            self.store.update_memory(older["id"], status="superseded", superseded_by=newer["id"])
+            self.store.update_memory(older["id"], status="superseded", superseded_by=newer["id"],
+                                     reversible_until=until)
             self.store.add_event(older["id"], "supersede",
                                  reason="compaction resolved a contradiction",
                                  token_delta=-older["tokens"])
@@ -653,7 +845,8 @@ class DietEngine:
                 targets = [m]
         elif query:
             ranked = self._rank(query, now)
-            targets = [r["memory"] for r in ranked if r["sim"] >= 0.55][:10]
+            targets = [r["memory"] for r in ranked
+                       if r["sim"] >= self.config.forget_min_sim][:10]
             if not targets and ranked and ranked[0]["sim"] > 0:
                 targets = [ranked[0]["memory"]]
         forgotten = []
@@ -685,7 +878,8 @@ class DietEngine:
             return {"restored": False, "reason": "purged after retention window"}
         now = self.store.now()
         self.store.update_memory(memory_id, status="active", last_accessed_at=now,
-                                 superseded_by=None, reversible_until=None)
+                                 superseded_by=None, reversible_until=None,
+                                 conflicts_with=None)
         self.store.add_event(memory_id, "restore", reason="user restore")
         return {"restored": True, "memory_id": memory_id}
 
@@ -704,10 +898,14 @@ class DietEngine:
         return self.store.add_probe(question, expected_fact, source_memory_id=source_id)
 
     def purge_expired(self, now: Optional[float] = None) -> int:
-        """Hard-expire quarantined memories past their reversible window."""
+        """Hard-expire quarantined AND superseded memories past their reversible
+        window (superseded rows get a window at supersede time), so old truth-
+        replacements don't leak forever but stay restorable until then."""
         now = self.store.now() if now is None else now
         expired = [
-            m for m in self.store.list_memories(status="quarantined")
+            m
+            for status in ("quarantined", "superseded")
+            for m in self.store.list_memories(status=status)
             if m.get("reversible_until") and m["reversible_until"] < now
         ]
         for m in expired:
@@ -827,39 +1025,100 @@ class DietEngine:
                 for m in self.store.list_memories(status="active")
                 if m.get("mtype") == "lesson"]
 
+    def conflicts(self) -> list[dict[str, Any]]:
+        """Active same-subject memories flagged as *possible* contradictions the
+        offline detector couldn't confidently auto-resolve — surfaced for review
+        (both kept), the honest alternative to silently coexisting or burying."""
+        out = []
+        for m in self.store.list_memories(status="active"):
+            cw = m.get("conflicts_with")
+            if not cw:
+                continue
+            other = self.store.get_memory(cw)
+            out.append({"memory": self._public_memory(m),
+                        "conflicts_with": self._public_memory(other) if other else None})
+        return out
+
+    def superseded(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Recently superseded memories with what replaced them + why — the
+        discoverable review surface so truth-replacement is never an invisible drop."""
+        out = []
+        for m in self.store.list_superseded(limit):
+            by_id = m.get("superseded_by")
+            by = self.store.get_memory(by_id) if by_id else None
+            reason = next((e["reason"] for e in reversed(self.store.events_for(m["id"]))
+                           if e["type"] == "supersede"), "")
+            out.append({"memory": self._public_memory(m),
+                        "superseded_by": self._public_memory(by) if by else None,
+                        "reason": reason,
+                        "reversible_until": m.get("reversible_until")})
+        return out
+
     def session_context(self, query: Optional[str] = None,
                         token_budget: Optional[int] = None) -> dict[str, Any]:
-        """What to inject at SessionStart: every lesson-learned, plus the most
-        relevant memories for the query (if any), packed under a budget.
+        """What to inject at SessionStart: the most useful lessons, plus the most
+        relevant memories for the query — the WHOLE payload packed under a budget.
 
-        This is the hook-injection surface — it is how memory reaches the model
-        without the model having to call a tool."""
+        This is the hook-injection surface (how memory reaches the model without a
+        tool call). Lessons no longer bypass the budget: they're ranked and packed
+        under a lesson sub-budget (the rest goes to query-relevant memories), so a
+        growing lesson corpus can't silently blow the context. Every injected
+        memory is tracked (the push path feeds the usefulness loop), and lessons
+        marked harmful are skipped."""
         now = self.store.now()
-        budget = int(token_budget or self.config.token_budget_default)
-        lessons = [m for m in self.store.list_memories(status="active")
-                   if m.get("mtype") == "lesson"]
-        injected = list(lessons)
+        budget = int(self.config.token_budget_default if token_budget is None else token_budget)
+        budget = max(0, budget)
+
+        # Rank lessons by usefulness (effective strength folds in harmful penalty,
+        # candidate decay, and access); skip ones marked harmful; pack under the
+        # lesson sub-budget. A '+N more' pointer keeps the omitted count honest.
+        all_lessons = [m for m in self.store.list_memories(status="active")
+                       if m.get("mtype") == "lesson"
+                       and int(m.get("harmful_count", 0) or 0) == 0]
+        all_lessons.sort(key=lambda m: (self.effective_strength(m, now), m["created_at"]),
+                         reverse=True)
+        lesson_budget = int(budget * self.config.lesson_budget_frac)
+        packed_lessons: list[dict[str, Any]] = []
+        for m in all_lessons:
+            if self._mtok(packed_lessons + [m]) <= lesson_budget:
+                packed_lessons.append(m)
+        lessons_omitted = len(all_lessons) - len(packed_lessons)
+
+        # The remainder of the FULL budget goes to query-relevant memories.
+        injected = list(packed_lessons)
+        memories: list[dict[str, Any]] = []
         if query:
-            ranked = self._rank(query, now)
-            for r in ranked:
-                if r["sim"] <= 0 or r["memory"].get("mtype") == "lesson":
+            for r in self._rank(query, now):
+                m = r["memory"]
+                if r["sim"] <= 0 or m.get("mtype") == "lesson":
                     continue
-                candidate = injected + [r["memory"]]
-                if self._mtok(candidate) <= budget:
-                    injected.append(r["memory"])
+                if self._mtok(injected + [m]) <= budget:
+                    injected.append(m)
+                    memories.append(m)
+
+        # The push path is a real injection — feed the usefulness/recurrence loop
+        # and the audit, so SessionStart isn't invisible to the flywheel.
+        for m in injected:
+            self._track_injection(m, now)
+            self.store.add_event(m["id"], "recall_inject", reason="session_context (push)")
+
         return {
-            "lessons": [self._public_memory(m) for m in lessons],
-            "memories": [self._public_memory(m) for m in injected if m.get("mtype") != "lesson"],
-            "text": self._format_context(lessons, [m for m in injected if m.get("mtype") != "lesson"]),
+            "lessons": [self._public_memory(m) for m in packed_lessons],
+            "memories": [self._public_memory(m) for m in memories],
+            "lessons_omitted": lessons_omitted,
+            "text": self._format_context(packed_lessons, memories, lessons_omitted),
             "tokens": self._mtok(injected),
         }
 
     def _format_context(self, lessons: list[dict[str, Any]],
-                        memories: list[dict[str, Any]]) -> str:
+                        memories: list[dict[str, Any]], lessons_omitted: int = 0) -> str:
         lines: list[str] = []
         if lessons:
             lines.append("Lessons learned (do not repeat these):")
             lines += [f"- {m['content']}" for m in lessons]
+            if lessons_omitted:
+                lines.append(f"- (+{lessons_omitted} more lessons — over the lesson budget; "
+                             f"raise lesson_budget_frac or run `leptin compact`)")
         if memories:
             if lines:
                 lines.append("")
@@ -884,35 +1143,54 @@ class DietEngine:
             "inject_count": int(mem.get("inject_count", 0) or 0),
             "useful_count": int(mem.get("useful_count", 0) or 0),
             "harmful_count": int(mem.get("harmful_count", 0) or 0),
+            "recur_sessions": int(mem.get("recur_sessions", 0) or 0),
+            "conflicts_with": mem.get("conflicts_with"),
+            "embedder": mem.get("embedder"),
         }
 
     # ------------------------------------------------------------- memory health
     def health(self) -> dict[str, Any]:
         """A 0–100 memory-health score + drift flags — the observable output of
         the loops. Storage/compression layers don't expose this."""
+        now = self.store.now()
         actives = self.store.list_memories(status="active")
         n = len(actives)
         if n == 0:
             return {"score": 100, "active": 0, "stale_rate": 0.0, "noise_rate": 0.0,
-                    "harmful": 0, "lessons": 0, "drift": [], "grade": "A"}
+                    "harmful": 0, "lessons": 0, "conflicts": 0, "auto_lessons": 0,
+                    "embedder_drift": False, "drift": [], "grade": "A"}
         stale = sum(1 for m in actives if m.get("stale"))
         harmful = sum(1 for m in actives if int(m.get("harmful_count", 0) or 0) > 0)
+        # Noise = injected a lot, never *explicitly* useful, AND decayed below the
+        # floor (a strong, genuinely-used memory is never noise — that was the
+        # false-positive). recur_sessions does NOT shield it.
         noise = sum(1 for m in actives
                     if m.get("mtype") != "lesson"
-                    and int(m.get("inject_count", 0) or 0) >= _NOISE_INJECTS
-                    and int(m.get("useful_count", 0) or 0) == 0)
+                    and int(m.get("inject_count", 0) or 0) >= self.config.noise_inject_count
+                    and int(m.get("useful_count", 0) or 0) == 0
+                    and self.effective_strength(m, now) < self.config.strength_floor)
+        conflicts = sum(1 for m in actives if m.get("conflicts_with"))
         lessons = sum(1 for m in actives if m.get("mtype") == "lesson")
-        stale_rate = stale / n
-        noise_rate = noise / n
-        score = round(100 * (1 - 0.6 * stale_rate - 0.3 * noise_rate
-                             - 0.4 * (harmful / n)))
-        score = max(0, min(100, score))
+        auto_lessons = sum(1 for m in actives if self._is_candidate_lesson(m))
+        embedder_drift = len({m.get("embedder") for m in actives if m.get("embedder")}) > 1
+        stale_rate, noise_rate, harmful_rate = stale / n, noise / n, harmful / n
+        # Normalized, floor-free, monotone score: weights divided by their sum so a
+        # fully-degraded store maps to 0, a clean one to 100 (no pre-clamp underflow).
+        w_stale, w_noise, w_harmful = 0.6, 0.3, 0.4
+        wsum = w_stale + w_noise + w_harmful
+        penalty = (w_stale * stale_rate + w_noise * noise_rate + w_harmful * harmful_rate) / wsum
+        score = max(0, min(100, round(100 * (1 - penalty))))
         drift = []
-        if stale_rate > 0.25:
+        if stale_rate > self.config.drift_stale_rate:
             drift.append(f"{stale}/{n} memories are stale — run `leptin compact` or re-anchor sources")
-        if noise_rate > 0.25:
-            drift.append(f"{noise}/{n} memories are recalled-but-never-useful — `leptin compact` will prune them")
+        if noise_rate > self.config.drift_noise_rate:
+            drift.append(f"{noise}/{n} memories are recalled-but-never-useful and cold — `leptin compact` will prune them")
+        if conflicts:
+            drift.append(f"{conflicts} possible contradiction(s) need review — run `leptin conflicts`")
+        if embedder_drift:
+            drift.append("mixed embedders in the store (a hosted→local fallback?) — run `leptin reembed`")
         grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D"
         return {"score": score, "grade": grade, "active": n, "stale_rate": round(stale_rate, 3),
                 "noise_rate": round(noise_rate, 3), "harmful": harmful, "lessons": lessons,
-                "drift": drift}
+                "conflicts": conflicts, "auto_lessons": auto_lessons,
+                "embedder_drift": embedder_drift, "drift": drift}

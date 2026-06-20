@@ -210,6 +210,114 @@ def _covered(memories: list[dict[str, Any]], expected: str) -> bool:
     return any(exp in m["content"].lower() for m in memories)
 
 
+# --- Correctness corpus: reversed decisions where the probe is lexically close
+# to BOTH the stale and the current fact, so a naive store genuinely surfaces the
+# wrong one. (subject, stale, current, probe, stale_marker, current_marker) ----
+_REVERSALS: list[tuple[str, str, str, str, str, str]] = [
+    ("pkg", "We use pnpm as our package manager.", "We use bun as our package manager.",
+     "what package manager do we use", "pnpm", "bun"),
+    ("trial", "The free trial period is 14 days.", "The free trial period is 30 days.",
+     "how long is the free trial period", "14 days", "30 days"),
+    ("region", "The default deploy region is us-east-1.", "The default deploy region is us-west-2.",
+     "what is the default deploy region", "us-east-1", "us-west-2"),
+    ("theme", "The user prefers dark mode.", "The user prefers light mode.",
+     "what theme does the user prefer", "dark", "light"),
+    ("db", "The primary database is MySQL.", "The primary database is Postgres.",
+     "what is the primary database", "mysql", "postgres"),
+    ("sessexp", "Sessions expire after 24 hours.", "Sessions expire after 1 hour.",
+     "how long until sessions expire", "24 hours", "1 hour"),
+    ("cache", "We cache with Redis.", "We cache with Memcached.",
+     "what do we cache with", "redis", "memcached"),
+    ("lang", "The service is written in Go.", "The service is written in Rust.",
+     "what language is the service written in", "go", "rust"),
+]
+
+
+def run_correctness(embedding_model: str = "local-hash",
+                    llm_model: str = "heuristic") -> dict[str, Any]:
+    """Measure the actual wedge: after a decision is reversed, does the store still
+    serve the STALE fact? A naive store (no supersede) does; Leptin shouldn't.
+
+    Reports ``stale_fact_returned_rate`` (lower is better) and current-truth
+    coverage for naive vs Leptin — the correctness number the token figure can't
+    stand in for."""
+    # Truly naive: BOTH dedup and supersede off (supersede is gated by
+    # contradiction_threshold, not dedup_threshold) → it keeps the stale fact.
+    naive_cfg = Config(dedup_threshold=2.0, contradiction_threshold=2.0,
+                       embedding_model=embedding_model, llm_model=llm_model)
+    lep_cfg = Config(embedding_model=embedding_model, llm_model=llm_model)
+
+    def build(cfg: Config) -> tuple[Store, DietEngine]:
+        store, eng = _make_engine(cfg)
+        for subject, stale, current, *_ in _REVERSALS:
+            eng.remember(stale, subject=subject)
+            eng.remember(current, subject=subject)
+        return store, eng
+
+    def measure(eng: DietEngine) -> tuple[float, float]:
+        wrong = surfaced = 0
+        for _s, _stale, _cur, q, sm, cm in _REVERSALS:
+            text = " ".join(m["content"].lower() for m in eng.recall(q)["memories"])
+            if sm.lower() in text:
+                wrong += 1              # served the stale fact (incorrect)
+            if cm.lower() in text:
+                surfaced += 1           # surfaced the current truth
+        n = len(_REVERSALS)
+        return wrong / n, surfaced / n
+
+    ns, ne = build(naive_cfg)
+    ls, le = build(lep_cfg)
+    naive_stale, naive_current = measure(ne)
+    lep_stale, lep_current = measure(le)
+    ns.close(); ls.close()
+    return {
+        "n_reversals": len(_REVERSALS),
+        "naive_stale_rate": round(naive_stale, 3),
+        "leptin_stale_rate": round(lep_stale, 3),
+        "naive_current_coverage": round(naive_current, 3),
+        "leptin_current_coverage": round(lep_current, 3),
+        "pass": lep_stale <= 0.1 and lep_stale < naive_stale and lep_current >= 0.9,
+    }
+
+
+def eval_contradiction(path: Optional[str] = None) -> dict[str, Any]:
+    """Precision/recall/F1 of the offline contradiction detector against a labeled
+    dataset (defaults to the bundled set). Honest about the offline ceiling:
+    paraphrase reversals that need hosted embeddings show up as recall misses."""
+    import json
+    import os
+
+    from leptin.llm import contradiction_signal
+
+    path = path or os.path.join(os.path.dirname(__file__), "data", "contradictions.jsonl")
+    rows = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    tp = fp = fn = tn = 0
+    misses: list[str] = []
+    for r in rows:
+        gold = bool(r["contradiction"])
+        pred = bool(contradiction_signal(r["a"], r["b"]).certain)
+        if gold and pred:
+            tp += 1
+        elif gold and not pred:
+            fn += 1
+            misses.append(f"{r['a']!r} vs {r['b']!r}")
+        elif not gold and pred:
+            fp += 1
+        else:
+            tn += 1
+    prec = tp / (tp + fp) if (tp + fp) else 1.0
+    rec = tp / (tp + fn) if (tp + fn) else 1.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+    return {"n": len(rows), "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "precision": round(prec, 3), "recall": round(rec, 3), "f1": round(f1, 3),
+            "false_positives": fp, "recall_misses_needing_hosted": misses}
+
+
 def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False,
         corpus: Optional[dict[str, Any]] = None, embedding_model: str = "local-hash",
         llm_model: str = "heuristic") -> dict[str, Any]:
@@ -217,8 +325,10 @@ def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False,
     inserts = corpus["inserts"]
     probes = corpus["probes"]
 
-    # --- Naive store: never merges, no budget cap, no relevance gate; dumps top-k. ---
-    naive_cfg = Config(dedup_threshold=2.0, token_budget_default=10**9,
+    # --- Naive store: no governance (dedup AND supersede off), no budget cap, no
+    #     relevance gate; dumps top-k. The honest "unbudgeted top-k" baseline. ---
+    naive_cfg = Config(dedup_threshold=2.0, contradiction_threshold=2.0,
+                       token_budget_default=10**9,
                        recall_k=naive_top_k, naive_top_k=naive_top_k,
                        recall_rel_floor=0.0, recall_min_sim=0.0,
                        embedding_model=embedding_model, llm_model=llm_model)
@@ -262,6 +372,21 @@ def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False,
             lep_hits += 1
     lep_recall_s = time.perf_counter() - t0
 
+    # --- Gated baseline: SAME relevance floor + budget as Leptin, but dedup/
+    #     supersede OFF. Isolates how much reduction is *packing* (budget+floor)
+    #     vs *governance* (dedup/supersede/decay) — so the headline doesn't let
+    #     the packing axis (which Headroom also does) stand in for the loop. ---
+    gated_cfg = Config(token_budget_default=budget, naive_top_k=naive_top_k,
+                       dedup_threshold=2.0, contradiction_threshold=2.0,
+                       embedding_model=embedding_model, llm_model=llm_model)
+    gated_store, gated = _make_engine(gated_cfg)
+    for subject, content in inserts:
+        gated.remember(content, subject=subject)
+    gated_tokens = sum(gated.recall(q)["tokens_used"] for q, _ in probes)
+    gated_store.close()
+    packing_reduction = (naive_tokens - gated_tokens) / naive_tokens if naive_tokens else 0.0
+    governance_reduction = (gated_tokens - lep_tokens) / gated_tokens if gated_tokens else 0.0
+
     n_probes = len(probes)
     naive_recall = naive_hits / n_probes
     lep_recall = lep_hits / n_probes
@@ -278,8 +403,11 @@ def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False,
         "naive_active_memories": naive_active,
         "leptin_active_memories": lep_active,
         "naive_tokens": naive_tokens,
+        "gated_tokens": gated_tokens,
         "leptin_tokens": lep_tokens,
         "token_reduction_pct": round(reduction * 100, 1),
+        "packing_reduction_pct": round(packing_reduction * 100, 1),
+        "governance_reduction_pct": round(governance_reduction * 100, 1),
         "naive_recall": round(naive_recall, 4),
         "leptin_recall": round(lep_recall, 4),
         "recall_loss_pct": round(recall_delta * 100, 2),
@@ -301,27 +429,41 @@ def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False,
 
 def format_table(r: dict[str, Any]) -> str:
     pass_str = "PASS ✅" if r["headline_pass"] else "MISS ❌"
-    lines = [
-        "",
-        "  Leptin benchmark — naive top-k store vs. Leptin (offline, deterministic)",
-        "  " + "-" * 64,
+    lines = ["", "  Leptin benchmark — correctness first, then footprint (offline, deterministic)",
+             "  " + "=" * 64]
+
+    # --- Correctness (the wedge) leads. ---
+    c = r.get("correctness")
+    if c:
+        cpass = "PASS ✅" if c["pass"] else "MISS ❌"
+        lines += [
+            f"  CORRECTNESS — after {c['n_reversals']} reversed decisions:",
+            f"    stale fact served : naive {c['naive_stale_rate']*100:.0f}%"
+            f"   leptin {c['leptin_stale_rate']*100:.0f}%   (lower is better)",
+            f"    current truth     : naive {c['naive_current_coverage']*100:.0f}%"
+            f"   leptin {c['leptin_current_coverage']*100:.0f}%",
+            f"    HEADLINE          : {cpass}  a naive store serves the OUTDATED fact "
+            f"{c['naive_stale_rate']*100:.0f}% of the time; Leptin {c['leptin_stale_rate']*100:.0f}%",
+            "  " + "-" * 64,
+        ]
+
+    # --- Footprint, with the packing-vs-governance split made explicit. ---
+    lines += [
         f"  corpus            : {r['n_inserts']} inserts, {r['n_probes']} probes",
         f"  active memories   : naive {r['naive_active_memories']:>4}   leptin {r['leptin_active_memories']:>4}"
         f"   (dedup kept {r['naive_active_memories'] - r['leptin_active_memories']} out)",
-        f"  recall budget     : {r['budget']} tokens   |   naive dumps top-{r['naive_top_k']}",
-        "  " + "-" * 64,
         f"  memory tokens     : naive {r['naive_tokens']:>6}   leptin {r['leptin_tokens']:>6}",
-        f"  TOKEN REDUCTION   : {r['token_reduction_pct']}%   (target ≥ 60%)",
-        f"  recall            : naive {r['naive_recall']:.3f}   leptin {r['leptin_recall']:.3f}",
-        f"  RECALL LOSS       : {r['recall_loss_pct']}%   (target ≤ 2%)",
+        f"  token reduction   : {r['token_reduction_pct']}%   (≈{r['packing_reduction_pct']}% packing"
+        f" + {r['governance_reduction_pct']}% governance on top)",
+        f"  recall            : naive {r['naive_recall']:.3f}   leptin {r['leptin_recall']:.3f}"
+        f"   (loss {r['recall_loss_pct']}%, target ≤ 2%)",
         f"  est. $ saved      : ${r['usd_saved']}  (priced at {r['models']['price_model']})",
-        f"  recall latency    : {r['latency_ms']['leptin_recall_avg']} ms/query (leptin)",
         "  " + "-" * 64,
-        f"  HEADLINE          : {pass_str}  "
-        f"≥60% fewer memory tokens at ≤2% recall loss",
+        f"  HEADLINE          : {pass_str}  current-truth correctness + ≥60% leaner recall at ≤2% loss",
         f"  models            : embedding={r['models']['embedding']}, llm={r['models']['llm']}",
-        "  driven by         : budgeted, relevance-packed recall + write-time dedup",
-        "  baseline          : a naive top-k dump (what stock memory MCPs do today)",
+        "  packing           : budget + relevance floor (the axis a compressor also helps with)",
+        "  governance        : dedup / supersede / decay (the correctness loop — Leptin's wedge)",
+        "  baseline          : unbudgeted top-k recall over the same store (not 'what MCPs do')",
         f"  corpus            : {r['dataset']} (real LoCoMo dataset)" if r.get("dataset")
         else "  corpus            : bundled synthetic LoCoMo-style set (illustrative, offline)",
         "",
@@ -337,5 +479,9 @@ def main(budget: int = 1500, naive_top_k: int = 10, dataset: Optional[str] = Non
             embedding_model=embedding_model, llm_model=llm_model)
     if dataset:
         r["dataset"] = dataset
+    else:
+        # The correctness bench uses the bundled reversal corpus (not real LoCoMo).
+        r["correctness"] = run_correctness(embedding_model, llm_model)
+        r["headline_pass"] = r["headline_pass"] and r["correctness"]["pass"]
     print(format_table(r))
     return r

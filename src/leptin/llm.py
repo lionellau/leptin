@@ -34,6 +34,48 @@ _ANTONYMS = [
     {"vegetarian", "omnivore"},
 ]
 
+# Structural tokens carry no "value" — they make two statements share a skeleton
+# without being the thing that conflicts. Stripped before the value-slot diff so
+# "we use pnpm" vs "we use bun" reduces to {pnpm} vs {bun} (a clean swap), while
+# "backend is FastAPI" vs "frontend is React" shares no salient tokens (not a swap).
+_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "to",
+    "of", "in", "on", "at", "for", "with", "and", "or", "our", "we", "i", "it",
+    "its", "this", "that", "these", "those", "their", "they", "as", "by", "from",
+    "user", "users",  # corpora talk about "the user" constantly — not the value
+}
+# Words signalling a change/replacement: they're noise in the value-slot diff
+# ("the region changed to X"), so strip them when isolating what actually differs.
+_CHANGE_WORDS = {
+    "now", "changed", "change", "updated", "update", "currently", "instead",
+    "actually", "became", "become", "becomes", "switched", "switch", "moved",
+    "moving", "longer", "anymore", "new", "old", "previously", "formerly",
+}
+_NUMSWAP_JACCARD = 0.7  # number-stripped skeletons this similar → a confident numeric reversal
+
+
+@dataclass
+class ContradictionSignal:
+    """Graded contradiction verdict.
+
+    ``certain`` → confidently mutually-exclusive (a negation flip, an antonym, a
+    single-slot value swap, or a numeric change on an otherwise-identical
+    statement) → safe to auto-supersede.
+
+    ``uncertain`` → looks like a conflict but isn't safe to auto-resolve offline
+    (a multi-token value swap, a numeric change on a loosely-similar statement) →
+    surface for review, never silently bury the old fact.
+
+    Truthiness is ``certain`` so existing ``if detect_contradiction(...)`` gates
+    only auto-supersede on confident contradictions (conservative by design)."""
+
+    certain: bool = False
+    uncertain: bool = False
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.certain
+
 
 @dataclass
 class MergeResult:
@@ -61,27 +103,79 @@ def _numbers(text: str) -> set[str]:
     return set(re.findall(r"\d+(?:\.\d+)?", text))
 
 
-def detect_contradiction(older: str, newer: str) -> bool:
-    """Heuristic: same topic but asserting opposite/incompatible facts."""
+def _salient(text: str) -> set[str]:
+    """Content words that carry the *value*: drop stopwords, change-words, and
+    bare numbers (numbers are judged separately)."""
+    return {w for w in _words(text)
+            if w not in _STOPWORDS and w not in _CHANGE_WORDS and not w.isdigit()}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    u = a | b
+    return len(a & b) / len(u) if u else 0.0
+
+
+def contradiction_signal(older: str, newer: str) -> ContradictionSignal:
+    """Graded same-topic contradiction verdict (see :class:`ContradictionSignal`).
+
+    Offline this is lexical: it confidently catches negation flips, antonyms,
+    single-slot value swaps ("we use pnpm" → "we use bun"), and numeric reversals
+    on an otherwise-identical statement ("14 days" → "30 days"); it deliberately
+    does NOT bury a true fact on a loose match ("8 cpu cores" vs "32 gb ram"),
+    routing those to ``uncertain`` for review instead. Deep paraphrase reversals
+    need hosted embeddings/LLM merge."""
     wa, wb = _words(older), _words(newer)
     if not wa or not wb:
-        return False
-    # Negation flip: one negates, the other doesn't, on shared vocabulary.
-    neg = {"not", "no", "never", "without", "n't"}
-    a_neg = bool(wa & neg)
-    b_neg = bool(wb & neg)
+        return ContradictionSignal()
+
     shared = wa & wb
-    if a_neg != b_neg and len(shared) >= 2:
-        return True
-    # Antonym pair present across the two.
+    # 1) Negation flip: one negates, the other doesn't, on shared vocabulary.
+    neg = {"not", "no", "never", "without", "n't", "dont", "doesnt", "cannot"}
+    if bool(wa & neg) != bool(wb & neg) and len(shared) >= 2:
+        return ContradictionSignal(certain=True, reason="negation flip on shared facts")
+    # 2) Antonym pair present across the two.
     for pair in _ANTONYMS:
         if (pair & wa) and (pair & wb) and (pair & wa) != (pair & wb):
-            return True
-    # Numeric mismatch on an otherwise-similar statement (e.g. "8 hours" vs "6").
+            return ContradictionSignal(certain=True, reason="antonym contradiction")
+
+    sa, sb = _salient(older), _salient(newer)
+    shared_sal = sa & sb
+    diff_a, diff_b = sa - sb, sb - sa
+
+    # 3) Single-slot value swap: same skeleton, exactly one differing salient
+    #    token on each side (pnpm↔bun, dark↔light, us-east-1↔us-west-2).
+    if shared_sal and len(diff_a) == 1 and len(diff_b) == 1:
+        return ContradictionSignal(
+            certain=True,
+            reason=f"value swap ({next(iter(diff_a))} → {next(iter(diff_b))})")
+
+    # 4) Numeric change. Confident only when the number-stripped skeletons are
+    #    highly similar ("14 days" → "30 days"); otherwise it's likely two
+    #    different facts that merely both contain numbers ("8 cores" / "32 gb").
     na, nb = _numbers(older), _numbers(newer)
-    if na and nb and na != nb and len(shared) >= 3:
-        return True
-    return False
+    if na and nb and na != nb:
+        skel = _jaccard(sa, sb)
+        if skel >= _NUMSWAP_JACCARD and shared_sal:
+            return ContradictionSignal(certain=True, reason="numeric change on the same statement")
+        if skel >= 0.4 and len(shared_sal) >= 1:
+            return ContradictionSignal(uncertain=True, reason="possible numeric conflict — review")
+
+    # 5) Multi-token same-subject divergence with real shared structure: not safe
+    #    to auto-resolve offline, but worth surfacing rather than silently keeping
+    #    both ("JWT in cookies" vs "session tokens in headers").
+    if len(shared_sal) >= 2 and diff_a and diff_b:
+        return ContradictionSignal(uncertain=True, reason="possible conflict — review (needs hosted merge to resolve)")
+
+    return ContradictionSignal()
+
+
+def detect_contradiction(older: str, newer: str) -> ContradictionSignal:
+    """Back-compatible entry point: returns the graded signal, which is truthy
+    iff the contradiction is *certain* (so existing supersede gates stay
+    conservative). Use ``.uncertain`` for the flag-for-review path."""
+    return contradiction_signal(older, newer)
 
 
 class HeuristicMerger:

@@ -1,0 +1,24 @@
+{"a": "We use pnpm as our package manager.", "b": "We use bun as our package manager.", "contradiction": true, "kind": "value-swap"}
+{"a": "The default deploy region is us-east-1.", "b": "The default deploy region is us-west-2.", "contradiction": true, "kind": "value-swap"}
+{"a": "The user prefers dark mode.", "b": "The user prefers light mode.", "contradiction": true, "kind": "value-swap"}
+{"a": "The primary database is MySQL.", "b": "The primary database is Postgres.", "contradiction": true, "kind": "value-swap"}
+{"a": "We cache with Redis.", "b": "We cache with Memcached.", "contradiction": true, "kind": "value-swap"}
+{"a": "The service is written in Go.", "b": "The service is written in Rust.", "contradiction": true, "kind": "value-swap"}
+{"a": "The free trial period is 14 days.", "b": "The free trial period is 30 days.", "contradiction": true, "kind": "numeric"}
+{"a": "Sessions expire after 24 hours.", "b": "Sessions expire after 1 hour.", "contradiction": true, "kind": "numeric"}
+{"a": "Rate limiting is 100 requests per minute.", "b": "Rate limiting is 250 requests per minute.", "contradiction": true, "kind": "numeric"}
+{"a": "The user is vegetarian.", "b": "The user is an omnivore.", "contradiction": true, "kind": "antonym"}
+{"a": "Feature flags are enabled in staging.", "b": "Feature flags are disabled in staging.", "contradiction": true, "kind": "antonym"}
+{"a": "The user likes spicy food.", "b": "The user dislikes spicy food.", "contradiction": true, "kind": "antonym"}
+{"a": "The deploy script should run migrations.", "b": "The deploy script should not run migrations.", "contradiction": true, "kind": "negation"}
+{"a": "Auth uses JWT in cookies.", "b": "Auth uses session tokens in headers.", "contradiction": true, "kind": "paraphrase-hard"}
+{"a": "The user is based in Berlin and works remotely.", "b": "The user relocated to Lisbon and now works in-office.", "contradiction": true, "kind": "paraphrase-hard"}
+{"a": "The backend is FastAPI on Postgres.", "b": "The frontend is React with Vite.", "contradiction": false, "kind": "different-fact"}
+{"a": "The box has 8 cpu cores.", "b": "The box has 32 gb of ram.", "contradiction": false, "kind": "numeric-different-fact"}
+{"a": "The user prefers dark mode.", "b": "The user prefers spaces over tabs.", "contradiction": false, "kind": "different-preference"}
+{"a": "Standup is at 9:30am Pacific.", "b": "Release day is the last Thursday of the month.", "contradiction": false, "kind": "unrelated"}
+{"a": "Alice is the lead designer.", "b": "Bob manages the on-call rotation.", "contradiction": false, "kind": "different-people"}
+{"a": "The API is versioned under /v2.", "b": "The API is documented with OpenAPI.", "contradiction": false, "kind": "elaboration"}
+{"a": "We deploy on Fly.io.", "b": "We deploy on Fly.io via GitHub Actions.", "contradiction": false, "kind": "elaboration"}
+{"a": "Logs are kept for 30 days.", "b": "Logs are shipped to Datadog.", "contradiction": false, "kind": "complementary"}
+{"a": "The repo uses 4-space indentation.", "b": "The repo uses Prettier for formatting.", "contradiction": false, "kind": "complementary"}

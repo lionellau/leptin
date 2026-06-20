@@ -59,17 +59,26 @@ needs *in-band* while it works. Everything else (the governance) is the loop.
    knowing what it learned the hard way and what's true *now*.
 2. **Act.** The model does its work, calling `recall`/`remember` as needed. These
    are the only model-facing tools.
-3. **Capture.** When a tool call fails, the `PostToolUse` hook distills it into a
-   never-decaying lesson — no human has to notice and write it down.
-4. **Reconcile.** On `remember`, near-duplicates merge and a newer fact that
-   contradicts an older one **supersedes** it. The old fact is kept, marked, and
-   stays auditable; recall returns the *current* truth, not both.
+3. **Capture.** When a tool call *genuinely* fails (a non-zero exit / stderr / an
+   error field — not the word "error" appearing in benign output), the `PostToolUse`
+   hook distills it into a **candidate** lesson. It re-injects but decays, and only
+   *graduates* to permanent if it recurs — so the lesson corpus stays bounded.
+4. **Reconcile.** On `remember`, near-duplicates merge and a *confident*
+   contradiction **supersedes** the old fact (kept, marked, reversible, auditable —
+   recall returns the current truth, not both). A contradiction the offline detector
+   *can't confidently resolve* is **flagged for review**, not buried — keeping the
+   conservative "never silently forget, never wrongly delete" guarantee. Offline the
+   detector is lexical (negation / antonym / single-slot value-swap / numeric);
+   semantic reversals need hosted embeddings.
 5. **Verify.** Before any prune commits, Leptin re-runs a probe set against the
-   post-prune store **inside a transaction**. If recall would regress, the entire
-   prune rolls back. Nothing is silently lost.
-6. **Forget.** What survives verification: cold facts decay, and memories that were
-   injected over and over but never proved useful ("noise") are pruned — reversibly,
-   within the retention window.
+   post-prune store **inside a transaction**, checking the *fact* still resolves (not
+   merely that an id survived). If recall would regress, the entire prune rolls back.
+   The measure is only as sharp as the configured embedder (lexical offline), and the
+   report says so (`low_confidence`, `verbatim_probe_fraction`).
+6. **Forget.** What survives verification: cold facts decay below the floor and are
+   pruned — reversibly, within the retention window. A strong, genuinely-used memory
+   is never mistaken for noise; "noise" (injected a lot, never useful) simply isn't
+   shielded from that decay-prune.
 
 The loop closes: what's forgotten in stage 6 changes what's injected in stage 1 next
 session, and the **usefulness signal** from stages 2–3 feeds stage 6's prune

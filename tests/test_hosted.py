@@ -156,8 +156,13 @@ def test_hosted_embedder_downgrades_after_exhausting_retries():
     eng = DietEngine(store, Config(embedding_model="text-embedding-3-small"),
                      embedder=_Dead())
     eng._retry_backoff = 0.0
-    eng._embed("hello")  # retries then falls back
-    assert eng._offline is True
+    vec = eng._embed("hello")  # retries, then falls back to local for this call
+    # v1.3: a TRANSIENT outage degrades non-permanently — local for now + a
+    # cooldown, then retry hosted — instead of pinning the store to local forever.
+    assert vec  # still got a (local) vector; never raised
+    assert eng._last_local is True
+    assert eng._hosted_cooldown_until > 0
+    assert eng._offline is False  # NOT permanently pinned
     store.close()
 
 

@@ -29,6 +29,8 @@ A persistent memory layer is supposed to make your agent smarter over time. Left
 > 1. your agent stops acting on **stale / contradictory** memory, and
 > 2. your agent stops **repeating mistakes** it already learned from.
 
+> **Measured, not asserted.** On the bundled reversal benchmark, a naive store serves the *outdated* fact **100% of the time** after a decision is reversed; Leptin serves it **0%** — at **0% recall loss**. Reproduce with `leptin bench`. Token footprint drops ~65% too, but that split is honest: most of it is budget-packing (the axis a context-compressor also helps with); the correctness loop is the part nothing else does. *Offline, supersede covers near-lexical, antonym, and numeric reversals; deep paraphrase reversals need hosted embeddings — see [honest limits](#design).*
+
 ---
 
 ## Why I built this
@@ -65,11 +67,11 @@ The defining mechanisms:
 
 - **Memory typing.** Every memory has a type with its own decay: `fact` (normal), `procedural` (slow), `task` (fades with the ticket), and **`lesson` — never decays.**
 - **Lessons-learned, auto-injected.** Store an anti-pattern once (`leptin lesson "..."`); it's re-injected at **every session start** via a hook, so the agent stops repeating it. No tool call required.
-- **Contradiction resolution (supersede).** A newer fact that conflicts with an older one wins; the old one is kept, marked superseded, and stays auditable. Recall returns the *current* truth, not both.
+- **Contradiction resolution (supersede), graded.** When a newer fact *confidently* contradicts an older one (a negation flip, an antonym, a single-slot value swap like `pnpm`→`bun`, or a numeric change on the same statement), the newer wins; the old is kept, marked superseded with a **reversible window**, and stays auditable (`leptin superseded`). Recall returns the *current* truth, not both. When the conflict is **uncertain** (a deeper paraphrase), Leptin does *not* bury either — it flags them for review (`leptin conflicts`) rather than silently coexisting or wrongly deleting a true fact. *(Offline this detector is lexical; semantic reversals need hosted embeddings.)*
 - **Verified, transactional forgetting (the guardrail).** Before any prune commits, Leptin re-runs a probe set against the post-prune store *inside a transaction*; if recall would regress, the whole prune **rolls back**. Nothing is silently lost, and everything is reversible.
 - **Provenance anchoring.** Anchor a memory to its source (`linear:ABC-123`, `spec:auth.md#flow`, `commit:sha`). When the source changes, `leptin stale <ref>` flags it — stale memories are down-weighted, not blindly trusted ("a fact is confidently wrong the moment its source changes").
 - **Auto mistake-capture (the post-tool loop).** When a tool call fails (a bad command, a broken build), the post-tool hook distills it into a never-decaying lesson automatically — no one has to remember to write it down. Next session it's re-injected, so the agent doesn't walk into the same wall twice.
-- **Recall-usefulness flywheel.** Leptin tracks which memories get injected, which recur across sessions (a useful signal), and which you flag as harmful (`leptin feedback <id> --harmful`). Memories that prove useful are reinforced; memories injected again and again but never useful are treated as **noise** and become prune candidates — so the store gets *more* relevant the more you use it, not just bigger.
+- **Recall-usefulness flywheel.** Leptin separates *recurrence* (needed again in a later session — a weak ranking tiebreaker) from *usefulness* (an explicit "it helped" via `leptin feedback`, or the `record_feedback` MCP tool). Useful memories are reinforced; a single **harmful** mark only down-weights (reversible by a later "useful") and takes two before it's flagged — so one noisy signal can't bury a fact. Cold, never-useful memories simply age out by decay; a strong, genuinely-used one is never mistaken for noise. The store gets *more* relevant with use, not just bigger.
 - **Memory-health score.** `leptin health` grades the store 0–100 (A–D) on stale rate, noise rate, and harmful hits, and flags drift before recall quality rots — an at-a-glance read on whether the loop is keeping memory clean.
 - **Budgeted, packed recall + savings ledger.** Recall is capped and packed for relevance; every op logs tokens (and $) saved vs. a naive top-k dump.
 
@@ -108,9 +110,10 @@ leptin dashboard                     # the receipts (tokens & $ saved, the audit
 
 ## Who Leptin is for
 
-The value shows up when an agent's memory **accumulates over time** and gets queried a lot:
+**The beachhead: a developer (or small team) running a coding agent on one long-lived codebase for weeks.** That's where memory accumulates into hundreds of facts and where decisions *get reversed* — you switch `pnpm`→`bun`, move regions, change the auth scheme — and an ungoverned store keeps handing the agent the version you already abandoned. Leptin keeps the *current* decision authoritative and proves it never forgot what you still need. If that's you, this is built for you.
 
-- **Spec-driven / long-running coding** — weeks on one codebase → hundreds of facts, changing decisions. Leptin keeps the *current* decision authoritative and stops the agent acting on reversed ones.
+It also helps wherever memory **accumulates and gets queried a lot**:
+
 - **Long-horizon research** — findings/sources pile up across sessions with updates and contradictions; Leptin keeps the knowledge base current and auditable.
 - **Autonomous / looping / scheduled agents** — they write and recall constantly; verified pruning + never-decaying lessons keep memory from rotting or running away.
 - **Small teams (2–10) working from specs + Linear tickets** — provenance anchoring ties memory to the ticket/spec so stale specs stop misleading the agent.
@@ -123,10 +126,10 @@ The value shows up when an agent's memory **accumulates over time** and gets que
 
 This isn't a teardown — the memory space is strong and these are good tools. Leptin sits on a **different axis**: most tools answer *"what do I store and how small can I make it?"* Leptin answers *"is what I'm storing still correct, and is it actually helping?"* — it's a control loop, not a store or a compressor, and it runs **alongside** them.
 
-- **vs storage layers (Mem0, vector stores):** they store and retrieve by similarity — excellent at that. They don't adjudicate which conflicting fact is *currently true*, verify that a prune didn't cost you a fact, or learn which memories actually earned their place. Leptin closes that loop, and can sit **on top of** your store.
-- **vs context-compression layers (e.g. Headroom):** they shrink what the agent reads each turn (great at that) and keep everything. Leptin works on the other end — the long-term store's *correctness over time*: superseding stale truth, keeping lessons permanent, pruning proven-noise under a recall guardrail. Compress the stream **and** govern the store; they don't overlap.
+- **vs storage layers (Mem0, vector stores):** they store and retrieve by similarity — excellent at that. They don't adjudicate which conflicting fact is *currently true*, verify that a prune didn't cost you a fact, or learn which memories actually earned their place. Leptin is a **self-contained local store with that correctness loop built in**, and it runs *alongside* your existing one. *(A "governor mode" that drives the loop over an external store like Mem0/pgvector is on the roadmap — not shipped yet, so today Leptin governs its own SQLite.)*
+- **vs context-compression layers (e.g. Headroom):** they shrink what the agent *reads each turn* (great at that) and keep everything. Leptin works on the other end — the long-term store's *correctness over time*: superseding stale truth, keeping lessons permanent, pruning proven-noise under a recall guardrail. Compress the stream **and** govern the store; they barely overlap.
 
-If you need a managed, hosted memory platform, use one. Leptin is the small, local, auditable loop that keeps long-term memory **correct and useful** — and plugs into whatever else you run.
+If you need a managed, hosted memory platform, use one. Leptin is the small, local, auditable loop that keeps long-term memory **correct and useful** — and runs alongside whatever else you use.
 
 ---
 
@@ -136,7 +139,7 @@ If you need a managed, hosted memory platform, use one. Leptin is the small, loc
 - **Offline by default, hosted by upgrade** — deterministic hashing embeddings + heuristic merge need no API key; `leptin-hlp[hosted]` adds OpenAI/Voyage embeddings + Claude/GPT merging (with retry + caching).
 - **Glass box, reversible** — every merge/decay/forget/supersede/tune is logged with a reason; nothing is hard-deleted within the retention window; schema is versioned and migrates in place.
 
-> Offline-mode caveat: the default hashing embedder catches *near-lexical* duplicates, not deep paraphrases. Configure hosted embeddings for semantic dedup. Defaults err toward **keeping** data.
+> **Honest limits (offline default).** The bundled hashing embedder is *lexical* — it matches near-identical text, not deep paraphrases. So offline, both **dedup** and **contradiction-supersede** fire on near-lexical / antonym / numeric reversals (`pnpm`→`bun`, `14 days`→`30 days`), and a semantic reversal (`"JWT in cookies"` → `"session tokens in headers"`) is **flagged for review**, not auto-resolved. Configure hosted embeddings (`leptin-hlp[hosted]`) for semantic dedup/supersede; verify the detector yourself with `leptin bench --eval-contradiction` (bundled set: precision 1.0, recall ~0.87, zero true facts buried). Defaults always err toward **keeping** data.
 
 ---
 
@@ -155,9 +158,15 @@ Leptin is **local-first**: the MCP server speaks stdio (no network listener); th
 ## Reproducible benchmark
 
 ```bash
-leptin bench          # offline, deterministic
+leptin bench                      # correctness first, then footprint (offline, deterministic)
+leptin bench --eval-contradiction # precision/recall/F1 of the contradiction detector
 ```
-On the bundled synthetic corpus, budgeted/packed recall returns **~66% fewer tokens than a naive top-k dump at 0% recall loss** — a narrow, reproducible claim about *recall payload size* (run it on real [LoCoMo](https://snap-research.github.io/locomo/) with `--dataset locomo.json --embedding-model text-embedding-3-small`).
+Two claims, both reproducible offline:
+
+- **Correctness (the wedge):** after a decision is reversed, a naive store serves the **outdated** fact **100%** of the time; Leptin serves it **0%**, with **0% recall loss**.
+- **Footprint:** ~**65% fewer recall tokens** than an unbudgeted top-k dump — but the bench *splits* this honestly into **~57% packing** (budget + relevance floor — the axis a context-compressor also helps with) **+ ~19% governance** (dedup/supersede/decay — the correctness loop). The packing number is not the wedge; the governance + correctness numbers are.
+
+Run it on real [LoCoMo](https://snap-research.github.io/locomo/) with `--dataset locomo.json --embedding-model text-embedding-3-small` (semantic recall needs hosted embeddings; the bundled corpus is lexical).
 
 ---
 
@@ -166,7 +175,7 @@ On the bundled synthetic corpus, budgeted/packed recall returns **~66% fewer tok
 ```bash
 uv venv && uv pip install -e ".[dev]" && pytest
 ```
-131 tests cover memory typing + never-decaying lessons, contradiction-supersede, the guardrail rollback/commit invariants, provenance/staleness, the recall-usefulness flywheel (inject/useful/harmful counters, noise pruning under the guardrail), auto mistake-capture via the post-tool hook, the memory-health score, the hook entrypoint (SessionStart injection), the lean vs `all` MCP surface (incl. a real `leptin serve` subprocess), schema migrations, the savings ledger, self-tuning, the dashboard HTTP layer, hosted integration + retry/degradation, and the reproducible benchmark. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
+155 tests cover the graded contradiction detector (a labeled precision/recall set — zero true facts buried), the non-circular guardrail (verify the *fact*, not just the id), memory typing + never-decaying lessons, budgeted session-start injection, reversible + discoverable supersede, the reframed flywheel (recurrence ≠ usefulness; graded harmful feedback), the candidate-lesson policy, embedder provenance + recovery, the memory-health/conflicts surfaces, provenance/staleness, the hook entrypoint, the lean vs `all` MCP surface (incl. a real `leptin serve` subprocess), schema migrations, the savings ledger, self-tuning (deterministic split), the dashboard HTTP layer, hosted integration + retry/degradation, and the correctness + footprint benchmarks. CI runs the suite, the benchmark, a clean wheel install, and the TS build on Python 3.10–3.13.
 
 ---
 
@@ -180,7 +189,10 @@ leptin lesson  "..."               # store a never-decaying lesson
 leptin remember "..." [--type fact|procedural|task|lesson] [--source-ref REF]
 leptin stale   <source-ref>        # flag memories whose source changed
 leptin feedback <id>... [--harmful]  # close the loop: reinforce or down-weight a memory
-leptin health                      # 0–100 memory-health score (stale / noise / harmful, A–D)
+leptin conflicts                   # possible contradictions flagged for review
+leptin superseded                  # what got replaced, by what, and why (reversible)
+leptin health                      # 0–100 memory-health score (stale / noise / harmful / conflicts)
+leptin reembed                     # re-vectorise after a hosted→local fallback
 leptin recall  "..." [--budget N]
 leptin compact [--dry-run]    leptin tune [--dry-run|--rollback|--history]
 leptin doctor   ·   leptin dashboard   ·   leptin report   ·   leptin bench
@@ -190,9 +202,9 @@ leptin doctor   ·   leptin dashboard   ·   leptin report   ·   leptin bench
 
 ## Roadmap
 
-**Shipped:** memory typing + never-decaying lessons · contradiction-supersede · verified transactional forgetting (guardrail + rollback) · provenance anchoring + staleness · the full control loop on lifecycle hooks (Claude Code + Codex): SessionStart injection, **post-tool auto mistake-capture**, pre-compact guarded prune · **recall-usefulness flywheel** (inject/useful/harmful + noise pruning) · **memory-health score** · lean MCP surface · budgeted recall + savings ledger · self-tuning · local dashboard · `leptin doctor` · schema migrations · 131 tests + CI.
+**Shipped:** the full control loop on lifecycle hooks (Claude Code + Codex) · **graded contradiction-supersede** (confident → auto-resolve, uncertain → flag for review) with a labeled precision/recall eval · **non-circular recall guardrail** (verifies the fact, not just the id) · reversible + discoverable supersede · memory typing + never-decaying lessons · **bounded, demotable lessons** + gated auto mistake-capture · the **reframed flywheel** (recurrence ≠ usefulness; graded harmful feedback; `record_feedback` MCP tool) · **memory-health + conflicts** surfaces · embedder provenance + `reembed` recovery · provenance anchoring + staleness · the **correctness + footprint benchmark** (packing vs governance split) · lean MCP surface · self-tuning (deterministic) · local dashboard · `leptin doctor` · schema migrations · 155 tests + CI.
 
-**Next:** a governor/adapter mode that runs the loop over an existing store (Mem0 / pgvector) so you keep your backend · more source adapters (Linear / GitHub / Jira / spec watchers) · more host installers (Cursor, Gemini CLI) · `sqlite-vec` fast path.
+**Next (big bets):** a **governor mode** that runs the loop over an *external* store (Mem0 / pgvector) so you keep your backend — today Leptin governs its own SQLite · an **opt-in semantic offline path** (small local NLI/embedder) so paraphrase reversals resolve without a hosted key · a **`sqlite-vec` ANN fast path** + disk-backed scale-sweep bench for 10k–100k-row stores · more source adapters (Linear / GitHub / Jira) and host installers (Cursor, Gemini CLI).
 
 ---
 
