@@ -152,6 +152,45 @@ def cmd_reembed(args) -> int:
     return 0
 
 
+def cmd_demo(args) -> int:
+    """The 60-second 'see it': a reversed decision, naive store vs Leptin.
+
+    Runs entirely in-memory (touches nothing on disk) so anyone can watch the
+    one thing Leptin does that a store/compressor doesn't — keep the *current*
+    decision authoritative after you change your mind."""
+    from leptin.api import Leptin
+    from leptin.config import Config
+
+    q = "what package manager do we use"
+    naive = Leptin(":memory:", config=Config(dedup_threshold=2.0, contradiction_threshold=2.0))
+    lep = Leptin(":memory:")
+    for m in (naive, lep):
+        m.remember("We use pnpm as our package manager.", subject="pkg")
+
+    def recall(m):
+        return [x["content"] for x in m.recall(q)["memories"]]
+
+    print("\n  Leptin demo — what happens when a decision gets reversed")
+    print("  " + "-" * 60)
+    print("  ① The team is on pnpm. The agent recalls it correctly:")
+    print(f"       recall(\"{q}\")  →  {recall(lep)}")
+    print("\n  ② You switch to bun. The agent stores the new decision:")
+    r = lep.remember("We use bun as our package manager.", subject="pkg")
+    naive.remember("We use bun as our package manager.", subject="pkg")
+    print(f"       remember(\"We use bun…\")  →  action={r['action']}"
+          f"  (old fact kept, reversible: `leptin superseded`)")
+    print("\n  ③ Next session, the agent asks again:")
+    print(f"       a naive store →  {recall(naive)}")
+    print("                         ↑ still serving the abandoned 'pnpm' — the agent acts on it")
+    print(f"       Leptin        →  {recall(lep)}")
+    print("                         ↑ only the current truth")
+    print("\n  That's the wedge: not storing or shrinking memory — keeping it CORRECT.")
+    print("  Reproduce the measured version with:  leptin bench\n")
+    naive.close()
+    lep.close()
+    return 0
+
+
 def cmd_recall(args) -> int:
     from leptin.api import Leptin
 
@@ -477,6 +516,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("reembed", help="Re-embed active memories with the current embedder.")
     add_db(sp)
     sp.set_defaults(func=cmd_reembed)
+
+    sp = sub.add_parser("demo", help="60-second demo: a reversed decision, naive store vs Leptin.")
+    sp.set_defaults(func=cmd_demo)
 
     sp = sub.add_parser("hook", help="Lifecycle-hook entrypoint for Claude Code / Codex.")
     add_db(sp)

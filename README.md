@@ -2,18 +2,18 @@
 
 # 🧬 Leptin
 
-### A control loop for agent memory.
+### Keep your coding agent's memory *correct* when decisions change.
 
-**Leptin is a local-first *control loop* that keeps your coding agent's long-term memory correct over time. It rides your agent's existing harness — the session-start, post-tool, and pre-compact hooks already firing every loop — to resolve contradictions, retire stale facts, make hard-won lessons stick, and learn which memories actually help. So the agent stops acting on outdated information and stops repeating mistakes — and before it ever forgets anything, it *proves* you can still recall what matters.**
+**You switch `pnpm`→`bun`, change the deploy region, swap the auth scheme — and weeks later the agent is *still acting on the version you abandoned*. Leptin is a local-first control loop that keeps long-term memory correct over time: it runs on your agent's existing hooks to resolve contradictions so the *current* decision wins, make hard-won lessons stick, and — before it forgets anything — prove you can still recall what matters. It's not a store and not a compressor; it runs alongside whichever you use.**
 
 [![CI](https://github.com/lionellau/leptin/actions/workflows/ci.yml/badge.svg)](https://github.com/lionellau/leptin/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/leptin-hlp?color=3fb950)](https://pypi.org/project/leptin-hlp/)
 [![python](https://img.shields.io/badge/python-3.10%2B-58a6ff)](#install)
 [![core deps](https://img.shields.io/badge/core%20deps-zero-58a6ff)](#design)
-[![tests](https://img.shields.io/badge/tests-131%20passing-3fb950)](#testing)
+[![tests](https://img.shields.io/badge/tests-155%20passing-3fb950)](#testing)
 [![license](https://img.shields.io/badge/license-MIT-8b98a9)](LICENSE)
 
-[Quickstart](#quickstart) · [Why I built this](#why-i-built-this) · [How it works](#how-it-works) · [Who it's for](#who-leptin-is-for) · [Where it fits](#where-leptin-fits-vs--alongside-other-tools) · [Security](#security)
+[See it in 30s](#see-it-in-30-seconds) · [Don't I already have this?](#wait--dont-i-already-have-this) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Who it's for](#who-leptin-is-for) · [Security](#security)
 
 <img src="assets/demo.svg" alt="Leptin: lessons injected at session start, recall under a token budget, verified forgetting" width="760"/>
 
@@ -21,15 +21,36 @@
 
 ---
 
-A persistent memory layer is supposed to make your agent smarter over time. Left ungoverned it does the opposite: it accumulates **duplicates, stale facts, and outright contradictions**, so the agent ends up *confidently wrong* — "use pnpm" survives six weeks after you switched to bun — and it repeats mistakes you already taught it not to make. The tools that prune to fix this do it **blindly**: you can't see what was dropped, can't get it back, and have no guarantee a useful fact wasn't deleted.
+Persistent memory is supposed to make your agent smarter over time. Ungoverned, it does the opposite: it piles up **duplicates, stale facts, and contradictions**, so the agent goes *confidently wrong* — recommending the framework you dropped, the region you migrated off, the auth scheme you replaced — and repeats mistakes you already corrected. The usual fix, blind pruning, just trades one problem for another: you can't see what was dropped or get it back.
 
-**Leptin is the *loop* that keeps memory correct — not another store.** A store answers "what did I save?"; Leptin closes the loop around it: every session, it dedups, supersedes contradictions so the *current* truth wins, decays what's cold, keeps your **lessons-learned permanent** and re-injects them automatically, watches which memories actually get used, and never prunes without first **proving recall didn't regress** — rolling back if it did. It plugs into the harness your agent already runs (hooks), and sits *alongside* whatever store or context-compressor you already use.
+**Leptin is the loop that keeps memory _correct_ — not another place to put it.** It plugs into the hooks your agent already fires and, every session, resolves contradictions so the *current* truth wins, keeps your lessons-learned permanent, retires what's cold, and never forgets a thing without first **proving recall didn't regress**.
 
-> Two outcomes you can feel:
-> 1. your agent stops acting on **stale / contradictory** memory, and
-> 2. your agent stops **repeating mistakes** it already learned from.
+## See it in 30 seconds
 
-> **Measured, not asserted.** On the bundled reversal benchmark, a naive store serves the *outdated* fact **100% of the time** after a decision is reversed; Leptin serves it **0%** — at **0% recall loss**. Reproduce with `leptin bench`. Token footprint drops ~65% too, but that split is honest: most of it is budget-packing (the axis a context-compressor also helps with); the correctness loop is the part nothing else does. *Offline, supersede covers near-lexical, antonym, and numeric reversals; deep paraphrase reversals need hosted embeddings — see [honest limits](#design).*
+```bash
+pip install leptin-hlp && leptin demo      # runs in-memory; touches nothing on disk
+```
+```text
+  ① The team is on pnpm — the agent recalls it correctly.
+  ② You switch to bun:   remember("We use bun…")  →  superseded
+  ③ Next session, the agent asks again:
+       a naive store →  ['…bun', '…pnpm']     ← still serving the abandoned pnpm
+       Leptin        →  ['…bun']              ← only the current truth
+```
+That's the whole product on one screen: **it keeps the current decision authoritative.** Want the measured version? `leptin bench` → a naive store serves the *outdated* fact **100%** of the time after a reversal; Leptin **0%**, at **0% recall loss**.
+
+## "Wait — don't I already have this?"
+
+Probably not the part that bites. Leptin sits on a **different axis** from a store or a compressor, and runs *alongside* them — not instead:
+
+| You might assume… | The reality |
+|---|---|
+| "Isn't this just **dedup**?" | Dedup removes *copies*. Leptin decides which of two *conflicting* facts is current (`pnpm` vs `bun`) and retires the old one — reversibly, auditably. |
+| "Doesn't my **context-compressor** (e.g. Headroom) cover it?" | Different job. A compressor shrinks what the agent reads *this turn*; Leptin keeps the *stored* facts consistent *over weeks*. They barely overlap — run both. |
+| "Isn't this just another **store** (e.g. Mem0)?" | A store retrieves by similarity; it doesn't adjudicate which fact is *currently true* or prove a prune didn't cost you something. Leptin is the correctness loop you wrap around a store. |
+| "Does it need an **API key / a service**?" | No. Local-first, zero core deps; offline for lexical/antonym/numeric reversals, hosted embeddings for semantic ones. Your DB stays a single local file. |
+
+> The token footprint also drops ~65%, but we report that *honestly*: most of it is budget-packing (the axis a compressor also helps with); the **correctness loop is the part nothing else does**. Don't take our word — reproduce both numbers with `leptin bench`, and see the [honest offline limits](#design).
 
 ---
 
@@ -182,6 +203,7 @@ uv venv && uv pip install -e ".[dev]" && pytest
 ## CLI
 
 ```bash
+leptin demo                        # 60-second before/after: a reversed decision (no setup)
 leptin connect claude-code|codex   # wire hooks + lean MCP
 leptin serve   --db PATH           # MCP server (stdio)
 leptin hook    <event>             # lifecycle-hook entrypoint (used by connect)

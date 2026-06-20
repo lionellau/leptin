@@ -185,6 +185,18 @@ def test_tuner_split_is_deterministic_across_hash_seeds():
     assert outs[0] and len(set(outs)) == 1  # identical partition regardless of seed
 
 
+def test_demo_command_shows_the_contrast():
+    """`leptin demo` runs offline and shows a naive store serving the stale fact
+    while Leptin serves only the current one."""
+    r = subprocess.run([sys.executable, "-m", "leptin", "demo"],
+                       capture_output=True, text=True,
+                       env=dict(os.environ, PYTHONPATH=SRC + os.pathsep + os.environ.get("PYTHONPATH", "")))
+    assert r.returncode == 0
+    out = r.stdout
+    assert "pnpm" in out and "bun" in out
+    assert "naive store" in out and "current truth" in out
+
+
 def test_health_score_is_floor_free_and_normalized(mem):
     # A fully-stale store should map toward 0, not underflow past it.
     for i in range(4):
