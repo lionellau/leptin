@@ -30,7 +30,8 @@ Persistent memory is supposed to make your agent smarter over time. Ungoverned, 
 ## See it in 30 seconds
 
 ```bash
-pip install leptin-hlp && leptin demo      # runs in-memory; touches nothing on disk
+pip install "git+https://github.com/lionellau/leptin"   # PyPI: pip install leptin-hlp (publishing soon)
+leptin demo                                              # runs in-memory; touches nothing on disk
 ```
 ```text
   ① The team is on pnpm — the agent recalls it correctly.
