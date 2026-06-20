@@ -2,7 +2,9 @@
 
 Runs offline on a bundled, deterministic LoCoMo-style corpus (multi-session
 dialog with the redundancy and contradictions real memory stores accumulate).
-Reports token reduction %, recall delta, latency, and $ — the headline claim.
+The headline is CORRECTNESS — after a decision is reversed, does the store still
+serve the stale fact (naive: yes; Leptin: no, at 0% recall loss)? Token footprint
+is reported too, split honestly into packing vs governance.
 
     leptin bench                  # default budget
     leptin bench --budget 200     # tune the recall token ceiling
@@ -330,7 +332,7 @@ def run(budget: int = 1500, naive_top_k: int = 10, verbose: bool = False,
     naive_cfg = Config(dedup_threshold=2.0, contradiction_threshold=2.0,
                        token_budget_default=10**9,
                        recall_k=naive_top_k, naive_top_k=naive_top_k,
-                       recall_rel_floor=0.0, recall_min_sim=0.0,
+                       recall_rel_floor=0.0, recall_min_sim=0.0, offline_recall_min_sim=0.0,
                        embedding_model=embedding_model, llm_model=llm_model)
     naive_store, naive = _make_engine(naive_cfg)
     t0 = time.perf_counter()

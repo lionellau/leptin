@@ -1,11 +1,11 @@
 # @leptin/client
 
-TypeScript client for [Leptin](https://github.com/lionellau/leptin) — the
-satiety hormone for agent memory.
+TypeScript client for [Leptin](https://github.com/lionellau/leptin) — personal,
+local-first memory infrastructure for your coding agent.
 
 It wraps the Leptin local HTTP API (the same one the dashboard uses), so JS /
-edge / browser code can read the savings ledger, browse memories, and trigger
-guardrailed compaction.
+edge / browser code can browse memories, see what was superseded or forgotten,
+read the audit ledger, and trigger guardrailed compaction.
 
 ```bash
 npm install @leptin/client

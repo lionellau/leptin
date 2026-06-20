@@ -40,9 +40,13 @@ def test_contradiction_supersedes_not_deletes(mem):
     assert "9090" in contents
 
 
-def test_supersede_removes_all_stale_versions(mem):
-    # Multiple near-duplicate stale phrasings (as multi-session dialog produces)
-    # are all superseded by the newer, contradicting fact.
+def test_supersede_removes_all_stale_versions(make_mem):
+    # When multiple distinct stale versions coexist, the newer contradicting fact
+    # supersedes ALL of them. Dedup off here so the two near-identical phrasings
+    # stay separate — with dedup on they'd merge first, which is also correct.
+    from leptin.config import Config
+
+    mem = make_mem(Config(dedup_threshold=2.0))
     mem.remember("The trial lasts 14 days.", subject="billing")
     mem.remember("The free trial lasts 14 days.", subject="billing")
     r = mem.remember("The trial now lasts 30 days.", subject="billing")

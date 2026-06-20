@@ -279,7 +279,13 @@ class DietEngine:
     def _similarity(self, query_text: str, query_emb: list[float], mem: dict[str, Any]) -> float:
         memb = mem.get("embedding") or []
         if query_emb and memb and len(query_emb) == len(memb):
-            return cosine(query_emb, memb)
+            cos = cosine(query_emb, memb)
+            # Offline, the local-hash vector is collision-prone and char-trigram
+            # dominated, so a clean word match can score low. Take the better of
+            # hash-cosine and exact word overlap — the free tier most people run.
+            if self._offline and self.config.offline_hybrid_sim:
+                return max(cos, self._keyword_sim(query_text, mem["content"]))
+            return cos
         # Degraded path: keyword overlap (recency/keyword recall).
         return self._keyword_sim(query_text, mem["content"])
 
@@ -664,6 +670,10 @@ class DietEngine:
             return []
         best_sim = max((r["sim"] for r in pool), default=0.0)
         floor = max(self.config.recall_min_sim, best_sim * self.config.recall_rel_floor)
+        if self._offline:
+            # No-good-match offline queries shouldn't inject a confidently-wrong
+            # memory — apply an absolute floor on top of the relative one.
+            floor = max(floor, self.config.offline_recall_min_sim)
         injected: list[dict[str, Any]] = []
         for r in pool:
             if r["sim"] <= 0 or r["sim"] < floor:

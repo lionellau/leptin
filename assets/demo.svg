@@ -23,7 +23,7 @@
   <circle cx="30" cy="25" r="6" fill="#f85149"/>
   <circle cx="50" cy="25" r="6" fill="#f0883e"/>
   <circle cx="70" cy="25" r="6" fill="#3fb950"/>
-  <text x="380" y="30" text-anchor="middle" class="m" font-size="13">leptin — the satiety hormone for agent memory</text>
+  <text x="380" y="30" text-anchor="middle" class="m" font-size="13">leptin — personal, local-first memory for your coding agent</text>
 
   <!-- Frame 1: install + connect -->
   <g id="f1" class="frame">

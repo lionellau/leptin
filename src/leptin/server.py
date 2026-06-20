@@ -25,11 +25,12 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "remember",
         "description": (
-            "Store something in long-term memory. Write-time dedup/merge keeps it "
-            "clean, and contradictions supersede the older fact. Set mtype='lesson' "
-            "for a never-forgotten anti-pattern/lesson; 'task' for ticket-scoped "
-            "notes that fade. source_ref anchors it to a spec/ticket so it can be "
-            "flagged stale when the source changes."
+            "Save a durable fact, decision, or lesson the moment your human states it "
+            "— so future-you doesn't re-learn it or act on the old version. If it "
+            "contradicts something you stored before, the NEW truth wins automatically "
+            "(the old one is kept, reversible). Use mtype='lesson' for a mistake you "
+            "must never repeat (never forgotten); 'task' for ticket-scoped notes that "
+            "fade. source_ref anchors it to a spec/ticket so it's flagged when that changes."
         ),
         "inputSchema": {
             "type": "object",
@@ -48,9 +49,11 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "recall",
         "description": (
-            "Retrieve relevant memories for a query, packed under a hard token "
-            "budget (not dumped top-k). Returns the memories that fit, tokens "
-            "used vs. a naive-store baseline, and how many were dropped."
+            "Retrieve what past-you knows — call this BEFORE acting on a project "
+            "decision (package manager, framework, region, auth, conventions). What "
+            "comes back is the CURRENT resolved truth: reversed decisions are already "
+            "removed, so trust it over your own assumptions. Packed under a token "
+            "budget (not a top-k dump)."
         ),
         "inputSchema": {
             "type": "object",
@@ -114,8 +117,9 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "diet_report",
         "description": (
-            "Show the receipts: tokens & dollars saved, op breakdown, guardrail "
-            "status, and top savers for a window (session | 7d | all)."
+            "Memory-health readout for a window (session | 7d | all): is your memory "
+            "staying correct and lean — contradictions resolved, stale facts flagged, "
+            "nothing silently dropped — not just growing. Includes the audit + savings."
         ),
         "inputSchema": {
             "type": "object",
@@ -235,9 +239,15 @@ class MCPServer:
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "leptin", "version": __version__},
                 "instructions": (
-                    "Leptin keeps this agent's long-term memory lean and audited. "
-                    "Use `remember` to store facts and `recall` to retrieve them "
-                    "under a token budget. Call `diet_report` to see tokens/$ saved."
+                    "This is YOUR persistent memory across sessions, on this machine. "
+                    "Before acting on a project decision (package manager, framework, "
+                    "region, auth, conventions), call `recall` first — your human may "
+                    "have reversed it in a session you don't remember, and `recall` "
+                    "returns only the CURRENT truth. When your human states a durable "
+                    "fact, decision, or a mistake to avoid, call `remember` — the newer "
+                    "truth automatically supersedes any older conflicting one. It's "
+                    "local, no account, no API key required. See AGENTS.md to install "
+                    "yourself into a new project."
                 ),
             })
         elif method in ("notifications/initialized", "initialized"):

@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from typing import Optional
 
 from leptin import __version__
@@ -42,6 +43,125 @@ def _mcp_block(db_path: str) -> str:
     return json.dumps(block, indent=2)
 
 
+# --- host wiring (so an agent can install Leptin on itself) -------------------
+_HOOK_EVENTS = (
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("PostToolUse", "post-tool-use"),
+    ("Stop", "stop"),
+    ("PreCompact", "pre-compact"),
+)
+_MINIMAL_HOOK_EVENTS = (
+    ("SessionStart", "session-start"),
+    ("Stop", "stop"),
+)
+
+
+def _host_settings_path(host: str) -> Optional[str]:
+    host = (host or "claude-code").lower()
+    if "claude" in host:
+        return os.path.expanduser("~/.claude/settings.json")
+    if "codex" in host:
+        return os.path.expanduser("~/.codex/settings.json")  # best-effort
+    return None
+
+
+def _connect_block(db: str, minimal: bool = False) -> dict:
+    leptin = _leptin_command()
+    events = _MINIMAL_HOOK_EVENTS if minimal else _HOOK_EVENTS
+    hooks = {
+        evt: [{"hooks": [{"type": "command", "command": f"{leptin} hook {hk} --db {db}"}]}]
+        for evt, hk in events
+    }
+    return {"mcpServers": {"leptin": {"command": leptin, "args": ["serve", "--db", db]}},
+            "hooks": hooks}
+
+
+def _merge_host_config(existing: dict, block: dict) -> tuple[dict, int]:
+    """Idempotent deep-merge of Leptin's mcpServers + hooks into existing host
+    settings, WITHOUT clobbering anything else. Hook entries are keyed by command
+    string, so re-running is a safe no-op. Returns (merged, n_changes)."""
+    merged = dict(existing)
+    changes = 0
+    servers = dict(merged.get("mcpServers") or {})
+    if servers.get("leptin") != block["mcpServers"]["leptin"]:
+        servers["leptin"] = block["mcpServers"]["leptin"]
+        changes += 1
+    merged["mcpServers"] = servers
+    hooks = dict(merged.get("hooks") or {})
+    for evt, entries in block["hooks"].items():
+        our_cmd = entries[0]["hooks"][0]["command"]
+        cur = list(hooks.get(evt) or [])
+        present = any(
+            any(h.get("command") == our_cmd for h in (e.get("hooks") or []))
+            for e in cur if isinstance(e, dict)
+        )
+        if not present:
+            cur.append(entries[0])
+            changes += 1
+        hooks[evt] = cur
+    merged["hooks"] = hooks
+    return merged, changes
+
+
+def _write_host_config(host: str, block: dict, dry_run: bool = False) -> dict:
+    """Write Leptin's wiring into the host's settings.json: back up first, merge
+    idempotently, refuse to touch a malformed file. The high-trust mutation that
+    lets an agent install Leptin on itself — made safe."""
+    path = _host_settings_path(host)
+    if not path:
+        return {"ok": False, "reason": f"unknown host '{host}' (try claude-code or codex)", "path": None}
+    existing: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing = json.loads(f.read() or "{}")
+        except (json.JSONDecodeError, ValueError):
+            return {"ok": False, "path": path,
+                    "reason": f"{path} is not valid JSON — refusing to overwrite; back it up and retry"}
+        if not isinstance(existing, dict):
+            return {"ok": False, "path": path, "reason": f"{path} is not a JSON object"}
+    merged, changes = _merge_host_config(existing, block)
+    if dry_run:
+        return {"ok": True, "dry_run": True, "path": path, "changes": changes, "preview": merged}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    backup = None
+    if os.path.exists(path):
+        backup = f"{path}.leptin-bak-{int(time.time())}"
+        shutil.copy2(path, backup)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(merged, indent=2) + "\n")
+    return {"ok": True, "path": path, "changes": changes, "backup": backup}
+
+
+def _host_wiring_status(host: str) -> dict:
+    """Post-install self-check: is Leptin actually wired into the host config?
+    Returns {level: ok|warn|error, detail}. Machine-readable via `leptin doctor --json`."""
+    host = (host or "claude-code").lower()
+    path = _host_settings_path(host)
+    if not path or not os.path.exists(path):
+        return {"level": "warn", "detail": f"not wired into {host} — run `leptin setup {host}`"}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.loads(f.read() or "{}")
+    except (json.JSONDecodeError, ValueError):
+        return {"level": "error", "detail": f"{path} is not valid JSON"}
+    server = (cfg.get("mcpServers") or {}).get("leptin")
+    if not server:
+        return {"level": "warn", "detail": f"leptin MCP server not in {path} — run `leptin setup {host}`"}
+    cmd = server.get("command")
+    resolves = bool(cmd and (shutil.which(cmd) or os.path.exists(cmd)))
+    n_hooks = sum(
+        1 for evt, entries in (cfg.get("hooks") or {}).items()
+        if any(any("leptin" in (h.get("command", "") or "") for h in (e.get("hooks") or []))
+               for e in (entries or []) if isinstance(e, dict))
+    )
+    if not resolves:
+        return {"level": "warn",
+                "detail": f"leptin MCP present but command '{cmd}' doesn't resolve on PATH — `pip install leptin-hlp`"}
+    return {"level": "ok", "detail": f"MCP + {n_hooks} hook event(s) wired in {path}"}
+
+
 def cmd_serve(args) -> int:
     from leptin.server import serve
 
@@ -75,6 +195,8 @@ def cmd_init(args) -> int:
     print("\nAdd this to your Claude Code / Codex MCP config:\n")
     print(_mcp_block(args.db))
     print("\nThen restart the client and ask the agent to remember something.")
+    print("\n# Tip: one command wires hooks + MCP and verifies it (an agent can run this itself):")
+    print("#   leptin setup claude-code && leptin doctor --json")
     return 0
 
 
@@ -293,26 +415,68 @@ def _lesson_from_failure(payload: dict) -> Optional[str]:
 
 
 def cmd_connect(args) -> int:
-    """Print the host config to wire Leptin's lean MCP surface + lifecycle hooks."""
-    db = args.db
-    leptin = _leptin_command()
-    hooks = {
-        evt: [{"hooks": [{"type": "command", "command": f"{leptin} hook {hk} --db {db}"}]}]
-        for evt, hk in (("SessionStart", "session-start"),
-                        ("UserPromptSubmit", "user-prompt-submit"),
-                        ("PostToolUse", "post-tool-use"),
-                        ("Stop", "stop"), ("PreCompact", "pre-compact"))
-    }
-    block = {"mcpServers": {"leptin": {"command": leptin, "args": ["serve", "--db", db]}},
-             "hooks": hooks}
+    """Wire Leptin into a coding-agent host. ``--write`` edits the host config
+    directly (backed up + idempotent); by default it prints the block to paste."""
     host = (args.host or "claude-code").lower()
-    settings = "~/.claude/settings.json" if "claude" in host else "Codex settings (hooks + mcp)"
-    print(f"Add this to your {host} config ({settings}):\n")
+    block = _connect_block(args.db, minimal=getattr(args, "minimal", False))
+
+    if getattr(args, "write", False) or getattr(args, "dry_run", False):
+        res = _write_host_config(host, block, dry_run=getattr(args, "dry_run", False))
+        if not res["ok"]:
+            print(f"✗ {res['reason']}", file=sys.stderr)
+            return 1
+        if res.get("dry_run"):
+            print(f"[dry-run] would update {res['path']} ({res['changes']} change(s)):\n")
+            print(json.dumps(res["preview"], indent=2))
+            return 0
+        note = "already wired (no changes)" if res["changes"] == 0 else f"{res['changes']} change(s)"
+        print(f"✓ Wired Leptin into {host}: {res['path']}  ({note})")
+        if res.get("backup"):
+            print(f"  backup: {res['backup']}")
+        print("  Restart the client to load it. Only `remember`/`recall` reach the model "
+              "(LEPTIN_MCP_TOOLS=all for the rest).")
+        return 0
+
+    # Default: print for manual paste (safe — no host mutation).
+    path = _host_settings_path(host) or "your host config"
+    print(f"Add this to your {host} config ({path}):\n")
     print(json.dumps(block, indent=2))
-    print("\nThe discipline (compact/decay/guardrail/self-tune) runs via the hooks +")
-    print("the CLI/daemon — only `remember` and `recall` are exposed to the model.")
-    print("Expose every tool with  LEPTIN_MCP_TOOLS=all.")
+    print(f"\nOr have Leptin write it for you:  leptin connect {host} --write")
+    print(f"Or let your agent install itself:  leptin setup {host}")
+    print("Only `remember`/`recall` are exposed to the model; expose all with LEPTIN_MCP_TOOLS=all.")
     return 0
+
+
+def cmd_setup(args) -> int:
+    """The one command an agent runs to install Leptin on itself: create the store,
+    write the host config (backed up, idempotent), and verify the wiring. Prints a
+    single PASS/FAIL line and exits non-zero on any failure (agent-checkable)."""
+    from leptin.api import Leptin
+
+    host = (args.host or "claude-code").lower()
+    with Leptin(args.db) as mem:
+        mem.save_config()
+        store_path = mem.store.path
+
+    block = _connect_block(args.db, minimal=getattr(args, "minimal", False))
+    res = _write_host_config(host, block, dry_run=getattr(args, "dry_run", False))
+    if not res["ok"]:
+        print(f"✗ setup failed: {res['reason']}", file=sys.stderr)
+        return 1
+    if res.get("dry_run"):
+        print(f"[dry-run] store at {store_path}; would wire {res['path']} ({res['changes']} change(s))")
+        return 0
+
+    status = _host_wiring_status(host)
+    ok = status["level"] != "error"
+    print(f"{'✓' if ok else '✗'} Leptin "
+          f"{'installed and wired into' if ok else 'install incomplete for'} {host}")
+    print(f"  store:  {store_path}")
+    print(f"  config: {res['path']}" + (f"  (backup: {res['backup']})" if res.get("backup") else ""))
+    print(f"  wiring: {status['detail']}")
+    if ok:
+        print("  Restart the client — your agent now has persistent, self-correcting memory.")
+    return 0 if ok else 1
 
 
 def cmd_doctor(args) -> int:
@@ -406,6 +570,10 @@ def cmd_doctor(args) -> int:
                 "active memories carry >1 embedder (a hosted→local fallback?) — run `leptin reembed`")
         mem.close()
 
+    # --- host wiring (is Leptin actually installed into the agent host?) ---
+    hw = _host_wiring_status(getattr(args, "host", None) or "claude-code")
+    add(hw["level"], "Host wiring", hw["detail"])
+
     icons = {"ok": "✓", "warn": "⚠", "error": "✗"}
     print("\n  Leptin doctor\n  " + "-" * 50)
     for level, name, detail in checks:
@@ -438,7 +606,7 @@ def cmd_tune(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="leptin",
-        description="Leptin — the satiety hormone for agent memory.",
+        description="Leptin — personal, local-first memory infrastructure for your coding agent (no account, no subscription).",
     )
     p.add_argument("--version", action="version", version=f"leptin {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
@@ -525,10 +693,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("event", nargs="?", help="session-start | user-prompt-submit | stop | pre-compact")
     sp.set_defaults(func=cmd_hook)
 
-    sp = sub.add_parser("connect", help="Print host config to wire hooks + lean MCP.")
+    sp = sub.add_parser("connect", help="Wire Leptin into a host (--write edits the config; default prints it).")
     add_db(sp)
     sp.add_argument("host", nargs="?", default="claude-code", help="claude-code | codex")
+    sp.add_argument("--write", action="store_true", help="Write the host config (backed up, idempotent).")
+    sp.add_argument("--dry-run", action="store_true", help="Show what --write would change, without writing.")
+    sp.add_argument("--minimal", action="store_true", help="Fewest hooks (SessionStart + Stop only).")
     sp.set_defaults(func=cmd_connect)
+
+    sp = sub.add_parser("setup", help="One command an agent runs to install Leptin on itself (init + wire + verify).")
+    add_db(sp)
+    sp.add_argument("host", nargs="?", default="claude-code", help="claude-code | codex")
+    sp.add_argument("--minimal", action="store_true", help="Fewest hooks (SessionStart + Stop only).")
+    sp.add_argument("--dry-run", action="store_true", help="Show what it would do, without writing.")
+    sp.set_defaults(func=cmd_setup)
 
     sp = sub.add_parser("recall", help="Recall memories under a token budget.")
     add_db(sp)
@@ -554,9 +732,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--port", type=int, default=8765)
     sp.set_defaults(func=cmd_dashboard)
 
-    sp = sub.add_parser("doctor", help="Health check: store, schema, models, hosted readiness.")
+    sp = sub.add_parser("doctor", help="Health check: store, schema, models, host wiring.")
     add_db(sp)
     sp.add_argument("--json", action="store_true")
+    sp.add_argument("--host", default="claude-code", help="Host to check wiring for (claude-code | codex).")
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("tune", help="Self-tune the memory policy (offline, guardrailed).")

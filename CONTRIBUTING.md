@@ -35,13 +35,25 @@ develop or to land a change.
 - Match the surrounding style; prefer clarity over cleverness; keep comments to
   the "why".
 
+**Design rule (non-negotiable):** core dependencies stay `[]` forever — the
+instant, offline `pip install` is the whole reason this ICP (an individual or
+small team running their own coding agent) picks Leptin. Any semantic-model path
+ships only as an opt-in extra (e.g. `leptin-hlp[hosted]`); the default must never
+require an account, an API key, or a download.
+
 ## Good first contributions
 
-- **Backend adapters** (`config.backend`): a Mem0 adapter (P1) or pgvector (P2)
-  implementing the same `Store` surface. This is the highest-leverage area.
-- A `sqlite-vec` fast path for vector search behind the existing interface.
-- More benchmark corpora / a LongMemEval harness.
-- Dashboard polish.
+- **Host installers** — make `leptin setup` work for more agents (Cursor, Gemini
+  CLI, Windsurf) and keep the self-install path agent-runnable. This is the
+  highest-leverage area: it's how an agent installs Leptin on itself.
+- A better **offline tier** that stays zero-dep (smarter lexical matching,
+  dev-term normalization) — the free path most people run.
+- More benchmark corpora / a LongMemEval harness; a real-LoCoMo result.
+- Memory/audit dashboard polish.
+- *Also welcome (roadmap, not the current focus):* a governor mode over an
+  external store (Mem0 / pgvector) via `config.backend`, and a `sqlite-vec` fast
+  path — these serve the larger-scale / embed-as-a-component case, which is not
+  the personal-infrastructure wedge.
 
 ## Submitting
 

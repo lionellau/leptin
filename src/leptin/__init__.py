@@ -1,6 +1,6 @@
-"""Leptin — the satiety hormone for agent memory.
+"""Leptin — personal, local-first memory infrastructure for your coding agent.
 
-A local-first *control loop* for agent memory. It rides your coding agent's
+No account, no subscription: a local-first *control loop* for agent memory. It rides your coding agent's
 harness hooks (session-start, post-tool, pre-compact) to keep long-term memory
 correct and useful over time: resolving contradictions so the current truth
 wins, capturing mistakes into never-decaying lessons, learning which memories
@@ -17,6 +17,6 @@ from leptin.config import Config
 from leptin.engine import DietEngine
 from leptin.storage import Store
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 __all__ = ["Config", "DietEngine", "Store", "__version__"]

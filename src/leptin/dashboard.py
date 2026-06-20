@@ -1,4 +1,4 @@
-"""Local savings dashboard — the demo magnet.
+"""Local memory dashboard — the glass-box audit surface.
 
 A dependency-free HTTP server (stdlib only) that exposes the ledger, the
 glass-box memory browser, and compaction/guardrail history, with a single-file
@@ -160,7 +160,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Leptin — savings dashboard</title>
+<title>Leptin — memory dashboard</title>
 <style>
   :root{
     --bg:#0b0e14; --panel:#121722; --panel2:#0f1420; --line:#1e2636;
@@ -207,7 +207,7 @@ INDEX_HTML = r"""<!doctype html>
 <body>
 <header>
   <h1>🧬 Leptin</h1>
-  <span class="tag">the satiety hormone for agent memory · savings dashboard</span>
+  <span class="tag">personal, local-first memory for your coding agent · audit dashboard</span>
 </header>
 <div class="wrap">
   <div class="cards" id="cards"></div>

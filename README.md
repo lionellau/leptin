@@ -12,7 +12,7 @@ Not a store, not a compressor — a local control loop that runs on your agent's
 [![PyPI](https://img.shields.io/pypi/v/leptin-hlp?color=3fb950)](https://pypi.org/project/leptin-hlp/)
 [![python](https://img.shields.io/badge/python-3.10%2B-58a6ff)](#install)
 [![core deps](https://img.shields.io/badge/core%20deps-zero-58a6ff)](#design)
-[![tests](https://img.shields.io/badge/tests-155%20passing-3fb950)](#testing)
+[![tests](https://img.shields.io/badge/tests-164%20passing-3fb950)](#testing)
 [![license](https://img.shields.io/badge/license-MIT-8b98a9)](LICENSE)
 
 [See it in 30s](#see-it-in-30-seconds) · [Don't I already have this?](#wait--dont-i-already-have-this) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Who it's for](#who-leptin-is-for) · [Security](#security)
@@ -103,21 +103,25 @@ The defining mechanisms:
 
 ## Quickstart
 
-### 1. Install
+One command does it all — create the store, wire the hooks + MCP into your host config (backed up, idempotent), and verify it:
+
 ```bash
-pip install leptin-hlp                 # once published to PyPI
-pip install "git+https://github.com/lionellau/leptin"   # from source today
-# optional hosted embeddings + LLM merge:
-pip install "leptin-hlp[hosted]"
+pip install "git+https://github.com/lionellau/leptin"   # PyPI: pip install leptin-hlp (soon)
+leptin setup claude-code        # or: codex
+leptin doctor --json            # confirm: "Host wiring" → "ok"
 ```
 
-### 2. Wire it into Claude Code / Codex (hooks + lean MCP)
-```bash
-leptin connect claude-code     # prints the config: lifecycle hooks + the 2-tool MCP server
-```
-This installs the **discipline as hooks** (memory auto-injected at session start; compaction on stop) and exposes only `recall` + `remember` to the model.
+That's it — restart the client and your agent has persistent, self-correcting memory. No account, no API key, nothing leaves your machine (a single SQLite file under `~/.leptin/`). Prefer to paste the config yourself? `leptin connect claude-code` prints it instead of writing.
 
-### 3. Teach it a lesson, then watch the loop keep it correct
+### Let your *agent* set it up
+
+Because the whole install is one verifiable command, you don't have to do it — your agent can. Tell it:
+
+> *"You keep forgetting decisions we've changed. Give yourself persistent memory — read AGENTS.md in github.com/lionellau/leptin and set it up."*
+
+It runs `pip install … && leptin setup claude-code && leptin doctor --json`, checks the result, and asks you to restart. [AGENTS.md](AGENTS.md) is written for exactly this.
+
+### Then teach it a lesson, and watch the loop keep it correct
 ```bash
 leptin lesson "Never run DB migrations on a Friday deploy."
 # next session, that lesson is injected automatically — the agent won't repeat it
@@ -125,7 +129,7 @@ leptin remember "Auth uses JWT in cookies." --subject auth --source-ref spec:aut
 leptin stale spec:auth.md#tokens     # when the spec changes, the memory is flagged
 leptin feedback <id> --harmful       # close the loop: tell Leptin a recall misled the agent
 leptin health                        # 0–100 score: is the loop keeping memory clean?
-leptin dashboard                     # the receipts (tokens & $ saved, the audit trail)
+leptin dashboard                     # glass-box audit: what was superseded / forgotten / merged, and why
 ```
 
 <div align="center"><img src="assets/dashboard.png" alt="Leptin dashboard" width="760"/></div>

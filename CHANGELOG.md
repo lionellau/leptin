@@ -4,6 +4,47 @@ All notable changes to Leptin are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-06-20
+
+The **personal-infrastructure** release. Repositions Leptin around a deliberate
+vision: it's **personal, local-first memory for an individual or small team's coding
+agent** — no account, no subscription, installs in ~30 seconds, and *the agent can
+install it on itself*. Not a SaaS component for builders; the production/scale/
+governor-over-pgvector angle is explicitly de-prioritized.
+
+### Added — the agent installs itself
+- **`leptin setup [host]`** — one command that creates the store, writes the host
+  config (hooks + MCP), and verifies the wiring; prints one PASS/FAIL line and exits
+  non-zero on failure, so an agent can run it unattended.
+- **`leptin connect --write`** — edits `~/.claude/settings.json` directly instead of
+  printing JSON to hand-paste: timestamped `.bak` backup, idempotent deep-merge that
+  never clobbers other servers/hooks, refuses to touch a malformed file. `--minimal`
+  (SessionStart + Stop only) and `--dry-run` too; default still prints.
+- **`leptin doctor` host-wiring check** (+`--host`) — confirms Leptin is actually
+  wired into the host (MCP present, hooks present, binary resolves); machine-readable
+  via `--json` as a post-install gate.
+- **`AGENTS.md`** — an agent-readable runbook: when to install yourself, the exact
+  commands, and how to operate (recall before acting; remember durable decisions).
+
+### Changed — agent-as-operator + free tier
+- The MCP `instructions` and `remember`/`recall`/`diet_report` descriptions now speak
+  **to the agent** about correctness-when-decisions-change ("call recall before acting
+  — your human may have reversed a decision you don't remember"), not token savings.
+- **Free offline tier hardened (still zero deps):** offline recall now scores as
+  `max(hash-cosine, word-overlap)` so a clear lexical match isn't lost to hash-
+  collision noise (`offline_hybrid_sim`), and an absolute `offline_recall_min_sim`
+  floor means a no-good-match query returns nothing instead of a confidently-wrong
+  memory. The bench's governance share rose accordingly (~19% → ~33%).
+- **Positioning swept** out of every surface: package identity, CLI/MCP strings,
+  dashboard, demo, TS client, `pyproject` metadata (keywords/classifier), CONTRIBUTING
+  (host-installers now the highest-leverage area; core deps stay `[]` forever), and
+  LAUNCH (discovery-first, correctness/personal-infra headlines). "Satiety hormone"
+  and token-budget-as-hero are gone.
+
+### Notes
+- 164 tests (adds host-config write/merge/backup/idempotency + offline floor/hybrid).
+- Core dependencies remain `[]`; any semantic-model path stays an opt-in extra.
+
 ## [1.3.0] — 2026-06-20
 
 The **credibility** release. An 8-persona adversarial review (senior engineers who

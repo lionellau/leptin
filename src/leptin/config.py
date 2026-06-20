@@ -56,6 +56,16 @@ class Config:
     recall_min_sim: float = 0.0
     """Absolute similarity floor below which a memory is never injected."""
 
+    offline_hybrid_sim: bool = True
+    """When offline (local-hash embedder), score recall as max(hash-cosine, word
+    overlap) so a clear lexical match isn't lost to hash-collision noise — the
+    free local tier most people run. Set False for pure cosine."""
+
+    offline_recall_min_sim: float = 0.12
+    """Extra absolute similarity floor applied ONLY when the local-hash embedder is
+    active, so a query with no good match returns nothing instead of a
+    confidently-wrong memory. 0.0 disables it (e.g. the benchmark's naive baseline)."""
+
     # --- Dedup / merge ---
     dedup_threshold: float = 0.86
     """Cosine similarity τ above which two memories are near-duplicates."""
@@ -206,6 +216,7 @@ class Config:
         self.guardrail_max_drop = clamp(self.guardrail_max_drop, 0.0, 1.0)
         self.recall_rel_floor = clamp(self.recall_rel_floor, 0.0, 1.0)
         self.recall_min_sim = clamp(self.recall_min_sim, 0.0, 1.0)
+        self.offline_recall_min_sim = clamp(self.offline_recall_min_sim, 0.0, 1.0)
         self.stale_penalty = clamp(self.stale_penalty, 0.0, 1.0)
         self.harmful_penalty = clamp(self.harmful_penalty, 0.0, 1.0)
         self.forget_min_sim = clamp(self.forget_min_sim, 0.0, 1.0)
